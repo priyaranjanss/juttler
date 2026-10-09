@@ -27,7 +27,13 @@ app.use('/api', conversationRoutes);
 app.use('/api/plugins', pluginRoutes);
 
 async function startServer() {
-  const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  // Railway (and most hosts) inject the port to bind. Fall back to 3000 locally.
+  const rawPort = process.env.PORT;
+  const port = rawPort && rawPort.trim() ? Number.parseInt(rawPort, 10) : 3000;
+
+  if (!Number.isFinite(port) || port <= 0) {
+    throw new Error(`PORT is invalid: "${rawPort}"`);
+  }
 
   // Keep the plugin marketplace catalog in sync with the built-in definitions.
   try {
@@ -42,10 +48,12 @@ async function startServer() {
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`Juttler API server running on http://0.0.0.0:${port}`);
-  });
-
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Juttler API server running on http://0.0.0.0:${port}`);
+  }).on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${port} is already in use. Another process is bound to it (a duplicate app.listen, or a previous run that did not exit).`);
+    }
+    console.error('Server failed to start:', err);
+    process.exit(1);
   });
 }
 
