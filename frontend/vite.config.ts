@@ -7,9 +7,9 @@ export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
     build: {
-      // Built into backend/public so the backend can serve the app without
-      // ever reaching outside its own service root.
-      outDir: '../backend/public',
+      // Standard static output — this app deploys on its own and talks to the
+      // backend through VITE_BACKEND_URL (see frontend/.env).
+      outDir: 'dist',
       emptyOutDir: true,
     },
     resolve: {

@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon --watch src --exec tsx src/server.ts",
-    "build": "npm --prefix ../frontend install --include=dev --no-audit --no-fund && npm --prefix ../frontend run build",
     "start": "tsx db/migrate.ts && tsx src/server.ts",
     "db:migrate": "tsx db/migrate.ts",
     "db:clean": "tsx db/clean.ts",

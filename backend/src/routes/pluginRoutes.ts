@@ -190,6 +190,15 @@ function startOauth(userId: string, slug: string): { authorizeUrl: string } {
     );
   }
 
+  // PUBLIC_BACKEND_URL is optional because it only feeds the callback URL. If
+  // it is unset in production the provider would be told to redirect to
+  // localhost, which fails confusingly later - so fail loudly here instead.
+  if (process.env.NODE_ENV === 'production' && !process.env.PUBLIC_BACKEND_URL) {
+    throw new Error(
+      'PUBLIC_BACKEND_URL is not set. OAuth plugins need it to be this backend\'s public domain (e.g. https://your-backend.up.railway.app), otherwise the provider redirects to localhost.'
+    );
+  }
+
   const state = mintState(userId, slug);
   const url = new URL(config.authorizeUrl);
   url.searchParams.set('client_id', config.clientId);
