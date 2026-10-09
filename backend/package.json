@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon --watch src --exec tsx src/server.ts",
-    "start": "tsx src/server.ts",
+    "build": "npm --prefix ../frontend install --include=dev --no-audit --no-fund && npm --prefix ../frontend run build",
+    "start": "tsx db/migrate.ts && tsx src/server.ts",
     "db:migrate": "tsx db/migrate.ts",
     "db:clean": "tsx db/clean.ts",
     "seed:admin": "tsx db/seed-admin.ts",
@@ -18,13 +19,13 @@
     "@upstash/redis": "^1.39.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "tsx": "^4.21.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "nodemon": "^3.0.1",
-    "tsx": "^4.21.0",
     "typescript": "^7.0.2"
   }
 }

@@ -7,7 +7,9 @@ export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
     build: {
-      outDir: '../dist',
+      // Built into backend/public so the backend can serve the app without
+      // ever reaching outside its own service root.
+      outDir: '../backend/public',
       emptyOutDir: true,
     },
     resolve: {
