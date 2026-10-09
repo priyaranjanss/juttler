@@ -1,0 +1,30 @@
+{
+  "name": "juttler-backend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --watch src --exec tsx src/server.ts",
+    "start": "tsx src/server.ts",
+    "db:migrate": "tsx db/migrate.ts",
+    "db:clean": "tsx db/clean.ts",
+    "seed:admin": "tsx db/seed-admin.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@clerk/express": "^2.1.77",
+    "@neondatabase/serverless": "^1.2.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@upstash/redis": "^1.39.0",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "nodemon": "^3.0.1",
+    "tsx": "^4.21.0",
+    "typescript": "^7.0.2"
+  }
+}

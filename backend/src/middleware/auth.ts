@@ -1,0 +1,53 @@
+import { Request, Response } from 'express';
+import { UserRecord, findUserById } from '../repositories/users';
+import { verifyAuthToken } from '../config/jwt';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      user?: UserRecord;
+    }
+  }
+}
+
+export const PUBLIC_AUTH_PATHS = ['/auth/register', '/auth/login', '/auth/logout'];
+
+export function isPublicAuthPath(path: string): boolean {
+  return PUBLIC_AUTH_PATHS.includes(path);
+}
+
+export function readBearerToken(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  if (header && header.startsWith('Bearer ')) {
+    return header.slice(7);
+  }
+  return undefined;
+}
+
+export async function authenticate(req: Request, res: Response, next: () => void): Promise<void> {
+  const userId = verifyAuthToken(readBearerToken(req));
+  if (!userId) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+
+  // The token proves identity; the database stays the source of truth for
+  // status and role so disabling a user takes effect immediately.
+  const user = await findUserById(userId);
+  if (!user || user.status !== 'active') {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+
+  req.user = user;
+  next();
+}
+
+export function requireAdmin(req: Request, res: Response, next: () => void): void {
+  if (req.user?.role !== 'admin') {
+    res.status(403).json({ error: 'Admin access required' });
+    return;
+  }
+  next();
+}

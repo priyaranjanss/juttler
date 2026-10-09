@@ -1,0 +1,6 @@
+{
+  "name": "Juttler",
+  "description": "Multi-agent AI workforce platform with Chief of Staff supervision, specialist bots, human approvals, tools, skills, and routines.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
