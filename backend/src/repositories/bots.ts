@@ -1,4 +1,4 @@
-﻿import { Bot } from '../../../frontend/src/types/index';
+﻿import { Bot } from '../types';
 import { sql } from '../config/db';
 import { generateId } from '../utils/id';
 

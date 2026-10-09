@@ -1,6 +1,6 @@
-import { Router, Request, Response } from 'express';
+﻿import { Router, Request, Response } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
-import { User, Bot, Message } from '../../../frontend/src/types/index';
+import { User, Bot, Message } from '../types';
 import { findUserById } from '../repositories/users';
 import { listBotsForUser, findBotById } from '../repositories/bots';
 import {
@@ -269,7 +269,7 @@ router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 /**
- * POST /api/approvals/:id/resolve — approve or reject a pending tool action.
+ * POST /api/approvals/:id/resolve â€” approve or reject a pending tool action.
  * Approving runs the tool for real through the gateway and posts its result.
  */
 router.post('/approvals/:id/resolve', asyncHandler(async (req: Request, res: Response) => {
@@ -318,7 +318,7 @@ router.post('/approvals/:id/resolve', asyncHandler(async (req: Request, res: Res
 }));
 
 /**
- * POST /api/conversations/:id/run-tool — runs one tool directly (from the
+ * POST /api/conversations/:id/run-tool â€” runs one tool directly (from the
  * chat composer or a plugin card), still through the gateway.
  */
 router.post('/conversations/:id/run-tool', asyncHandler(async (req: Request, res: Response) => {

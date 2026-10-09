@@ -12,8 +12,8 @@
  * (merging a PR, posting to Slack), because those leave the system.
  */
 
-import { Bot } from '../../../frontend/src/types/index';
-import { BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS } from '../../../frontend/src/types/index';
+import { Bot } from '../types';
+import { BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS } from '../constants';
 import {
   listBotsForUser,
   createBot,

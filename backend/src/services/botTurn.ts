@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Runs a bot turn end-to-end: collects the tools that bot may call, exposes
  * delegation to specialists when the bot is the Chief of Staff, and streams the
  * real tool activity back so the chat can render it.
@@ -7,7 +7,7 @@
  * chat route and a delegated specialist turn behave identically.
  */
 
-import { Bot, Message } from '../../../frontend/src/types/index';
+import { Bot, Message } from '../types';
 import { listBotsForUser, findBotById } from '../repositories/bots';
 import { listBotAvailableTools } from '../repositories/plugins';
 import { runBotTurn, BotToolSpec, ToolEvent, ToolExecution } from './aiService';

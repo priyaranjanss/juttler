@@ -8,7 +8,8 @@ import {
   listBotAvailableTools,
 } from '../repositories/plugins';
 import { verifyAiConfig, listAvailableModels } from '../services/aiService';
-import { Bot, AI_PROVIDERS } from '../../../frontend/src/types/index';
+import { Bot } from '../types';
+import { AI_PROVIDERS } from '../constants';
 import { CHIEF_BOT_CONFIG, CHIEF_SYSTEM_PROMPT } from '../config/chiefOfStaff';
 
 const router = Router();

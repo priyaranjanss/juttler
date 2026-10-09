@@ -1,5 +1,5 @@
-/**
- * The Tool Gateway — the single path every bot tool call goes through.
+﻿/**
+ * The Tool Gateway â€” the single path every bot tool call goes through.
  *
  * Order of checks:
  *   1. Is the plugin connected for this user?
@@ -11,7 +11,7 @@
  * There are no simulated outcomes: a failure returns the real error.
  */
 
-import { ApprovalRequest } from '../../../frontend/src/types/index';
+import { ApprovalRequest } from '../types';
 import { PLUGINS } from '../config/pluginCatalog';
 import { generateId } from '../utils/id';
 import { sql } from '../config/db';
@@ -57,7 +57,7 @@ function ownerPluginOf(toolName: string) {
 
 /**
  * Runs the gateway checks and executes the tool when permitted.
- * Sensitive tools return `{ kind: 'approved' }` — the caller shows the user an
+ * Sensitive tools return `{ kind: 'approved' }` â€” the caller shows the user an
  * approval card and calls `executeApprovedTool` once they approve.
  */
 export async function callTool(req: GatewayRequest): Promise<GatewayOutcome> {
@@ -92,7 +92,7 @@ export async function callTool(req: GatewayRequest): Promise<GatewayOutcome> {
       toolName,
       actionName: toolDef?.description || toolName,
       toolParams: req.args,
-      reason: `${req.botName} wants to run ${owner.name} → ${toolName}. Approve to execute it with your connected account.`,
+      reason: `${req.botName} wants to run ${owner.name} â†’ ${toolName}. Approve to execute it with your connected account.`,
     });
     return { kind: 'approved', approval };
   }

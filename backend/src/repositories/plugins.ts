@@ -1,7 +1,7 @@
 ﻿import { sql } from '../config/db';
 import { generateId } from '../utils/id';
 import { PLUGINS, isSensitiveTool } from '../config/pluginCatalog';
-import { ApprovalRequest } from '../../../frontend/src/types/index';
+import { ApprovalRequest } from '../types';
 import { encryptToken, decryptTokenSafe, tokenFingerprint } from '../services/tokenCrypto';
 
 // ---------------------------------------------------------------------------

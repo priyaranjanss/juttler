@@ -7,7 +7,7 @@
  * editing this file refreshes the catalog on the next migration.
  */
 
-import { PluginCredentialSpec } from '../../../frontend/src/types/index';
+import { PluginCredentialSpec } from '../types';
 
 export interface ToolParameterSchema {
   type: 'object';

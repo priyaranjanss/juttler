@@ -1,7 +1,7 @@
-import { Bot, Message } from '../../../frontend/src/types/index';
+﻿import { Bot, Message } from '../types';
 import { AUTONOMY_RULES } from '../config/autonomy';
 
-// A bot must have an explicit model chosen in its settings — there is
+// A bot must have an explicit model chosen in its settings â€” there is
 // deliberately no default, so a misconfigured bot fails loudly instead of
 // silently billing calls to an unintended model.
 function resolveModel(bot: Bot): string | null {
@@ -115,7 +115,7 @@ function toOpenAiTools(tools: BotToolSpec[]) {
  * Runs one bot turn against its configured gateway, executing any tools the
  * model asks for through `executor` (the Tool Gateway).
  *
- * Never fabricates a reply or a tool result — failures are returned verbatim.
+ * Never fabricates a reply or a tool result â€” failures are returned verbatim.
  */
 export async function runBotTurn(params: {
   bot: Bot;
@@ -182,7 +182,7 @@ export async function runBotTurn(params: {
         let detail = '';
         try {
           const body = (await res.json()) as GatewayErrorBody;
-          detail = body?.error?.message ? ` — ${body.error.message}` : '';
+          detail = body?.error?.message ? ` â€” ${body.error.message}` : '';
         } catch {
           // no JSON body
         }
@@ -192,7 +192,7 @@ export async function runBotTurn(params: {
             : res.status === 402 || res.status === 503
               ? ' (gateway reports insufficient balance)'
               : res.status === 429
-                ? ' (rate limited — try again shortly)'
+                ? ' (rate limited â€” try again shortly)'
                 : '';
         return { tools: collected, waitingForApproval: false, error: { kind: 'http', message: `Gateway returned ${res.status}${detail}${hint}` } };
       }
@@ -300,7 +300,7 @@ export async function runBotTurn(params: {
       }
     }
 
-    // Ran out of tool rounds — say so rather than looping forever
+    // Ran out of tool rounds â€” say so rather than looping forever
     return {
       tools: collected,
       tokenUsage: usage,
@@ -334,7 +334,7 @@ export async function verifyAiConfig(
     return { ok: false, message: 'Enter an API key first.' };
   }
 
-  // A model must be chosen first — verification sends a real completion with it.
+  // A model must be chosen first â€” verification sends a real completion with it.
   const modelId = model?.trim();
   if (!modelId) {
     return { ok: false, message: 'Pick a model first (use Sync to load the list).' };
@@ -357,7 +357,7 @@ export async function verifyAiConfig(
     });
 
     if (res.ok) {
-      return { ok: true, message: `${modelId} verified — this bot can chat.`, status: res.status };
+      return { ok: true, message: `${modelId} verified â€” this bot can chat.`, status: res.status };
     }
 
     let detail = '';

@@ -1,5 +1,5 @@
-import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
-import { User } from '../../../frontend/src/types/index';
+﻿import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
+import { User } from '../types';
 import { sql } from '../config/db';
 import { generateId } from '../utils/id';
 
@@ -51,7 +51,7 @@ function mapRow(row: UserRow): UserRecord {
 
 // ---------------------------------------------------------------------------
 // Auth tokens are issued and verified as stateless HS256 JWTs.
-// See config/jwt.ts — there is deliberately no server-side session store.
+// See config/jwt.ts â€” there is deliberately no server-side session store.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

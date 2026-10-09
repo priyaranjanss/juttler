@@ -1,4 +1,4 @@
-import { Conversation, Message } from '../../../frontend/src/types/index';
+﻿import { Conversation, Message } from '../types';
 import { sql } from '../config/db';
 import { generateId } from '../utils/id';
 
