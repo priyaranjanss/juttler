@@ -8,8 +8,15 @@ import {
   ApprovalRequest,
 } from '../../types/index';
 
-const backendUrl: string = import.meta.env.VITE_BACKEND_URL || '';
-const BASE_URL = backendUrl ? `${backendUrl.replace(/\/+$/, '')}/api` : '/api';
+const configuredBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
+const backendUrl = configuredBackendUrl
+  ? /^https?:\/\//i.test(configuredBackendUrl)
+    ? configuredBackendUrl
+    : `https://${configuredBackendUrl}`
+  : '';
+const BASE_URL = backendUrl
+  ? `${backendUrl.replace(/\/+$/, '').replace(/\/api$/i, '')}/api`
+  : '/api';
 
 let authToken: string | null = null;
 

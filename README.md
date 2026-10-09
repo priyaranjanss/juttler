@@ -73,7 +73,7 @@ Two env files, each holding the **other side's URL** — that's the whole link b
 | `backend/.env` | `FRONTEND_URL` | `http://localhost:5173` | CORS — the origin the backend allows to call the API |
 | `frontend/.env` | `VITE_BACKEND_URL` | `http://localhost:3000` | Inlined into the browser bundle — where API calls go |
 
-The frontend calls the backend **directly** at `VITE_BACKEND_URL` (no proxy), and the backend answers only to origins matching `FRONTEND_URL`. (Vite requires the `VITE_` prefix for anything the browser sees.)
+The frontend calls the backend **directly** at `VITE_BACKEND_URL` (no proxy), and the backend answers only to origins matching `FRONTEND_URL`. (Vite requires the `VITE_` prefix for anything the browser sees.) For Vercel, set `VITE_BACKEND_URL` to the complete backend origin, including the protocol, e.g. `https://juttler-production.up.railway.app` (do not add `/api`). Because Vite embeds this value at build time, redeploy after changing it.
 
 **Same-origin production:** when the backend serves the built frontend, build with `VITE_BACKEND_URL=""` (calls go to `/api` on the app's own origin) and leave `FRONTEND_URL` empty — no CORS needed.
 
