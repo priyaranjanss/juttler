@@ -98,6 +98,14 @@ npm run dev             # backend :3000 + frontend :5173
 - Frontend: http://localhost:5173 (proxies `/api` → :3000)
 - **First registered user becomes admin** and lands on `/admin`; everyone after lands on `/workspace`.
 
+### Vercel deployment
+
+The frontend is a single-page app with client-side routes such as `/login` and
+`/workspace/chat/:botId`. The Vercel rewrites in `vercel.json` (or
+`frontend/vercel.json` when the Vercel project root is set to `frontend`) send
+direct route requests back to the app entry point, so hard refreshes work.
+Configure `VITE_BACKEND_URL` in Vercel to point to the deployed backend API.
+
 ## Database
 
 All application state lives in Neon Postgres (`backend/db/schema.sql`): users, bots, conversations, messages, approvals, skills, routines, memories, activity logs, tool call logs, and global settings.
