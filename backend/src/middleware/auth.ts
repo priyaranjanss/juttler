@@ -13,8 +13,14 @@ declare global {
 
 export const PUBLIC_AUTH_PATHS = ['/auth/register', '/auth/login', '/auth/logout'];
 
+// OAuth provider callbacks, e.g. /plugins/gmail/callback. Google redirects the
+// user's BROWSER here, and a browser navigation carries no Authorization header,
+// so these must be reachable without a session. Safety comes from the single-use
+// CSRF state minted by POST /plugins/:slug/oauth/start, not from the session.
+const OAUTH_CALLBACK_PATH = /^\/plugins\/[^/]+\/callback$/;
+
 export function isPublicAuthPath(path: string): boolean {
-  return PUBLIC_AUTH_PATHS.includes(path);
+  return PUBLIC_AUTH_PATHS.includes(path) || OAUTH_CALLBACK_PATH.test(path);
 }
 
 export function readBearerToken(req: Request): string | undefined {
