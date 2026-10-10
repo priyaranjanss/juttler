@@ -35,6 +35,12 @@ interface OauthProviderConfig {
   clientSecret: string;
   scope: string;
   redirectUri: string;
+  /**
+   * Provider-specific query params for the authorize request. `response_type=code`
+   * is required by Google; a provider that needs more (Google also needs
+   * access_type=offline to hand back a refresh token) declares it here.
+   */
+  extraAuthParams?: Record<string, string>;
   /** Pulls the account identity out of a fetched /user profile. */
   identity: (profile: any) => Record<string, any>;
   /** How the access token is shaped into our stored credential object. */
@@ -56,6 +62,7 @@ function oauthConfigs(provider: string): OauthProviderConfig | null {
             clientSecret: process.env.GITHUB_CLIENT_SECRET,
             scope: 'repo read:user',
             redirectUri: `${base}/api/plugins/github/callback`,
+            extraAuthParams: { response_type: 'code' },
             identity: (profile) => ({ login: profile.login, name: profile.name || profile.login }),
           toCredential: (token) => ({ token: token.access_token }),
         }
@@ -72,6 +79,15 @@ function oauthConfigs(provider: string): OauthProviderConfig | null {
             // offline access so we can refresh without asking again
             scope: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send',
             redirectUri: `${base}/api/plugins/gmail/callback`,
+            // response_type is mandatory for Google; offline access is what makes
+            // it return a refresh token, which we store for later re-auth. The
+            // account already stores one from the first authorization, and Google
+            // only issues a new one when explicitly consented again.
+            extraAuthParams: {
+              response_type: 'code',
+              access_type: 'offline',
+              prompt: 'consent',
+            },
             identity: (profile) => ({ email: profile.email, name: profile.name || profile.email }),
             // Google needs the refresh token kept, not just the access token.
             toCredential: (token) => ({
@@ -207,6 +223,19 @@ function startOauth(userId: string, slug: string): { authorizeUrl: string } {
   url.searchParams.set('redirect_uri', config.redirectUri);
   url.searchParams.set('scope', config.scope);
   url.searchParams.set('state', state);
+  for (const [key, value] of Object.entries(config.extraAuthParams ?? {})) {
+    url.searchParams.set(key, value);
+  }
+
+  // Google (and GitHub) reject the request outright if response_type is absent,
+  // which surfaces as "invalid_request: Required parameter is missing".
+  // Guard here so the misconfiguration cannot reach the provider.
+  if (!url.searchParams.get('response_type')) {
+    throw new Error(
+      `OAuth provider "${slug}" is missing response_type. Set extraAuthParams: { response_type: 'code' } for it.`
+    );
+  }
+
   return { authorizeUrl: url.toString() };
 }
 
