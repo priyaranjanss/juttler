@@ -303,6 +303,19 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
     setExpandedToolCalls((prev) => ({ ...prev, [callId]: !prev[callId] }));
   };
 
+  // Tool activity is internal plumbing: the roster lookup a Chief runs, the raw
+  // payload a tool returned, and a specialist hand-off are all hidden from the
+  // thread. The bot's own answer is what the user reads.
+  //
+  // Two exceptions, both of which ask the user to do something and so must stay
+  // visible: approval cards, and the "connect this service" card carried by a
+  // tool result that reports a missing plugin.
+  const visibleMessages = messages.filter((m) => {
+    if (m.type === 'tool_call') return false;
+    if (m.type === 'tool_result') return Boolean(m.metadata?.missingPluginSlug);
+    return true;
+  });
+
   // Status Indicator
   const statusBadge =
     activeBotInThread?.status === 'working' ? (
@@ -500,7 +513,7 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
             </div>
           </div>
         ) : (
-          messages.map((msg) => {
+          visibleMessages.map((msg) => {
             const isUser = msg.senderType === 'user';
             // Tool identity for this message, so card conditions stay readable
             const toolCall = msg.metadata?.toolCall;
@@ -633,8 +646,10 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
                   </div>
                 )}
 
-                {/* Tool result â€” the real payload a tool returned */}
-                {msg.type === 'tool_result' && msg.metadata?.toolResult && (
+                {/* Tool result - the real payload a tool returned. Hidden when
+                    this message is really a "connect this service" prompt, which
+                    has its own card below. */}
+                {msg.type === 'tool_result' && msg.metadata?.toolResult && !msg.metadata?.missingPluginSlug && (
                   <div
                     className={`w-full max-w-xl rounded-2xl border p-3 text-xs space-y-2 ${
                       msg.metadata.toolResult.status === 'error'

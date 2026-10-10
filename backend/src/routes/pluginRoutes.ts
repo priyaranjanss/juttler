@@ -42,7 +42,9 @@ interface OauthProviderConfig {
 }
 
 function oauthConfigs(provider: string): OauthProviderConfig | null {
-  const base = process.env.PUBLIC_BACKEND_URL || 'http://localhost:3000';
+  // Strip trailing slashes so a value like "https://api.example.com/" cannot
+  // build a "//api/plugins/..." callback Google would reject as a mismatch.
+  const base = (process.env.PUBLIC_BACKEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
 
   switch (provider) {
     case 'github':

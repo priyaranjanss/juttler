@@ -3,7 +3,17 @@ import { useApp } from '../../contexts/AppContext';
 import { BotBlobAvatar } from '../common/BotBlobAvatar';
 import { Avatar } from '../common/Avatar';
 import { Bot } from '../../types';
-import { Search, Plus, Plug, Bot as BotIcon, Users, Settings2 } from 'lucide-react';
+import {
+  Search,
+  Plus,
+  Plug,
+  Bot as BotIcon,
+  Users,
+  Settings2,
+  ChevronDown,
+  Sun,
+  Moon,
+} from 'lucide-react';
 
 interface GrokSidebarProps {
   onOpenCreateBotModal?: () => void;
@@ -26,6 +36,7 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
     selectedConversationId,
     openChatWithBot,
     theme,
+    toggleTheme,
     navigate,
     installedPlugins,
     isWorkspaceLoading,
@@ -34,6 +45,8 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
   const isDark = theme === 'dark';
   const [searchQuery, setSearchQuery] = useState('');
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  // Dropdown on the user account row at the bottom of the sidebar
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
 
   if (isCollapsed) {
     return null;
@@ -251,12 +264,70 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
           )}
         </button>
 
-        {/* User Section - Logged in user from account database */}
-        <div className="flex items-center space-x-2.5 px-2 py-1.5 min-w-0">
-          <Avatar name={currentUser?.name || 'User'} src={currentUser?.avatar} size="md" />
-          <span className={`text-xs font-extrabold truncate ${isDark ? 'text-white' : 'text-[#0f1419]'}`}>
-            {currentUser?.name || 'User'}
-          </span>
+        {/* User account - opens a small dropdown (Settings / Change theme) */}
+        <div className="relative">
+          <button
+            onClick={() => setAccountMenuOpen((prev) => !prev)}
+            className={`w-full flex items-center justify-between px-2 py-1.5 rounded-xl transition text-left min-w-0 ${
+              isDark ? 'hover:bg-[#181a1f]' : 'hover:bg-[#eef1f4]'
+            }`}
+            aria-haspopup="menu"
+            aria-expanded={accountMenuOpen}
+          >
+            <div className="flex items-center space-x-2.5 min-w-0">
+              <Avatar name={currentUser?.name || 'User'} src={currentUser?.avatar} size="md" />
+              <span className={`text-xs font-extrabold truncate ${isDark ? 'text-white' : 'text-[#0f1419]'}`}>
+                {currentUser?.name || 'User'}
+              </span>
+            </div>
+            <ChevronDown
+              className={`h-4 w-4 shrink-0 transition-transform ${
+                isDark ? 'text-[#71767b]' : 'text-[#8b98a5]'
+              } ${accountMenuOpen ? 'rotate-180' : ''}`}
+            />
+          </button>
+
+          {accountMenuOpen && (
+            <>
+              {/* Click-outside to dismiss */}
+              <div className="fixed inset-0 z-30" onClick={() => setAccountMenuOpen(false)} />
+
+              <div
+                role="menu"
+                className={`absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-2xl border shadow-xl ${
+                  isDark ? 'border-[#26292d] bg-[#16181c] text-white' : 'border-[#e5e7eb] bg-white text-[#0f1419]'
+                }`}
+              >
+                {/* Settings - placeholder, does nothing yet */}
+                <button
+                  role="menuitem"
+                  onClick={() => setAccountMenuOpen(false)}
+                  className={`flex w-full items-center space-x-2.5 px-3 py-2 text-xs font-semibold transition ${
+                    isDark ? 'hover:bg-[#202327]' : 'hover:bg-[#f0f2f5]'
+                  }`}
+                >
+                  <Settings2 className="h-4 w-4 text-[#71767b]" />
+                  <span>Settings</span>
+                </button>
+
+                {/* Change theme - switches between light and dark */}
+                <button
+                  role="menuitem"
+                  onClick={() => toggleTheme()}
+                  className={`flex w-full items-center space-x-2.5 border-t px-3 py-2 text-xs font-semibold transition ${
+                    isDark ? 'border-[#26292d] hover:bg-[#202327]' : 'border-[#e5e7eb] hover:bg-[#f0f2f5]'
+                  }`}
+                >
+                  {isDark ? (
+                    <Sun className="h-4 w-4 text-amber-400" />
+                  ) : (
+                    <Moon className="h-4 w-4 text-purple-600" />
+                  )}
+                  <span>Change theme</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </aside>
