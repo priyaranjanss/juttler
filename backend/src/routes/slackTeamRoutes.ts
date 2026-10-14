@@ -4,7 +4,13 @@ import { findBotById, publishTeamBot, toPublicBot } from '../repositories/bots';
 import { ensureOwnedTeam, findMembership, linkSlackAccount } from '../repositories/teams';
 import { findUserById } from '../repositories/users';
 import { findInstallationByUserAndPlugin } from '../repositories/plugins';
-import { beginSlackInstall, buildAccountLinkUrl, finishSlackInstall, slackInstallView } from '../services/slackTeam/install';
+import {
+  beginSlackInstall,
+  buildAccountLinkUrl,
+  disconnectSlackApp,
+  finishSlackInstall,
+  slackInstallView,
+} from '../services/slackTeam/install';
 import { acceptSlackEvent, slackChallenge } from '../services/slackTeam/inbound';
 import { verifySlackLink } from '../config/jwt';
 
@@ -63,6 +69,15 @@ router.post('/team-bots/:botId/connect', asyncHandler(async (req: Request, res: 
     res.json(await beginSlackInstall(req.user!.id, req.params.botId));
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not connect Slack' });
+  }
+}));
+
+router.delete('/team-bots/:botId', asyncHandler(async (req: Request, res: Response) => {
+  try {
+    await disconnectSlackApp(req.user!.id, req.params.botId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not disconnect Slack' });
   }
 }));
 

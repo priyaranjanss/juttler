@@ -10,6 +10,7 @@ import {
   insertSlackApp,
   saveSlackCredentials,
   markSlackInstall,
+  deleteSlackAppByBotId,
   SlackBotApp,
 } from '../../repositories/slackApps';
 import { canManageTeam, ensureOwnedTeam, findMembership, linkSlackAccount, listMembers } from '../../repositories/teams';
@@ -306,12 +307,25 @@ export async function syncSlackProfile(bot: Bot): Promise<void> {
   });
 }
 
+/** Disconnects Slack for this bot: best-effort Slack app delete, then clear our row. */
 export async function removeSlackApp(botId: string): Promise<void> {
   const app = await findSlackAppByBotId(botId);
-  if (!app?.slackAppId) return;
-  try {
-    await deleteSlackApp(app.slackAppId);
-  } catch (err) {
-    console.error('Could not delete the Slack app:', err);
+  if (!app) return;
+  if (app.slackAppId) {
+    try {
+      await deleteSlackApp(app.slackAppId);
+    } catch (err) {
+      console.error('Could not delete the Slack app:', err);
+    }
   }
+  await deleteSlackAppByBotId(botId);
+}
+
+/** Owner disconnects Slack so they can connect again (e.g. after moving to production). */
+export async function disconnectSlackApp(userId: string, botId: string): Promise<void> {
+  const bot = await findBotById(botId);
+  if (!bot || bot.userId !== userId) {
+    throw new Error('Bot not found');
+  }
+  await removeSlackApp(botId);
 }

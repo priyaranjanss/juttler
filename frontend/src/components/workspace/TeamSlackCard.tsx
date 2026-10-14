@@ -60,9 +60,23 @@ export const TeamSlackCard: React.FC<TeamSlackCardProps> = ({ bot, isDark }) => 
     }
   };
 
+  const disconnect = async () => {
+    setBusy('disconnect');
+    try {
+      await api.disconnectTeamBotSlack(bot.id);
+      setInstall(await api.getTeamBotSlack(bot.id));
+      showToast(`${bot.name} disconnected from Slack`, 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not disconnect Slack', 'warning');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const status = install?.status ?? 'not_connected';
   const workspace = install?.slackTeamName || install?.ownerSlackTeamName;
   const mention = `@${bot.name}`;
+  const connectedLike = status !== 'not_connected';
 
   return (
     <div className="px-3">
@@ -120,6 +134,21 @@ export const TeamSlackCard: React.FC<TeamSlackCardProps> = ({ bot, isDark }) => 
                 : status === 'pending_install'
                   ? 'Finish connecting Slack'
                   : 'Connect to Slack'}
+          </button>
+        )}
+
+        {connectedLike && (
+          <button
+            type="button"
+            onClick={disconnect}
+            disabled={busy !== null}
+            className={`mt-2 w-full rounded-xl py-2 text-xs font-bold transition disabled:opacity-60 ${
+              isDark
+                ? 'border border-[#2f3336] text-[#f4212e] hover:bg-[#2a1215]'
+                : 'border border-[#e5e7eb] text-[#f4212e] hover:bg-[#fff5f5]'
+            }`}
+          >
+            {busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect Slack'}
           </button>
         )}
       </div>

@@ -68,6 +68,11 @@ export async function findSlackAppByBotId(botId: string): Promise<SlackBotApp | 
   return rows.length > 0 ? mapApp(rows[0]) : null;
 }
 
+/** Drops this bot's Slack install row (threads cascade). */
+export async function deleteSlackAppByBotId(botId: string): Promise<void> {
+  await sql`delete from slack_bot_apps where bot_id = ${botId}`;
+}
+
 export async function findSlackAppBySlackAppId(slackAppId: string): Promise<SlackBotApp | null> {
   const rows = (await sql`
     select * from slack_bot_apps where slack_app_id = ${slackAppId} limit 1

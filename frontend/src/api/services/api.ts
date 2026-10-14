@@ -295,6 +295,10 @@ export const api = {
     return request(`/slack/team-bots/${encodeURIComponent(botId)}/connect`, jsonBody({}));
   },
 
+  async disconnectTeamBotSlack(botId: string): Promise<{ success: boolean }> {
+    return request(`/slack/team-bots/${encodeURIComponent(botId)}`, { method: 'DELETE' });
+  },
+
   async linkSlackIdentity(token: string): Promise<{ linked: boolean; displayName: string | null }> {
     return request('/slack/link/identity', jsonBody({ token }));
   },
