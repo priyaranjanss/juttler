@@ -7,6 +7,7 @@
 
 import { requiredString, requestJson } from '../shared';
 import { ToolExecutor } from '../shared';
+import { sanitizeFileContent, sanitizeRepoPath } from '../../services/toolArgSanitize';
 
 /** Accepts "owner/name" or a full GitHub URL. */
 function parseRepo(value: string): { owner: string; repo: string } {
@@ -68,7 +69,8 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   get_file: async (args, ctx) => {
-    const path = requiredString(args, 'path').replace(/^\/+/, '');
+    const path = sanitizeRepoPath(requiredString(args, 'path'));
+    if (!path) throw new Error('path is required (repo-relative, e.g. backend/src/file.ts).');
     const encoded = encodeRepoPath(path);
     const ref = args.ref ? `?ref=${encodeURIComponent(String(args.ref))}` : '';
     const headers = githubHeaders(ctx);
@@ -187,7 +189,7 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   list_files: async (args, ctx) => {
-    const path = typeof args.path === 'string' ? args.path.replace(/^\/+/, '') : '';
+    const path = typeof args.path === 'string' ? sanitizeRepoPath(args.path) : '';
     const ref = args.ref ? `?ref=${encodeURIComponent(String(args.ref))}` : '';
     const suffix = path ? `/contents/${encodeRepoPath(path)}` : '/contents';
     const data = await requestJson(`${repoUrl(args, suffix)}${ref}`, { headers: githubHeaders(ctx) });
@@ -225,7 +227,7 @@ export const githubTools: Record<string, ToolExecutor> = {
     if (!sha) throw new Error(`Could not resolve ref "${refName}".`);
 
     const tree = await requestJson(`${repoUrl(args, `/git/trees/${sha}`)}?recursive=1`, { headers });
-    const prefix = typeof args.path === 'string' ? args.path.replace(/^\/+|\/+$/g, '') : '';
+    const prefix = typeof args.path === 'string' ? sanitizeRepoPath(args.path).replace(/\/+$/g, '') : '';
     let paths = (tree.tree ?? [])
       .filter((node: any) => node?.path && (node.type === 'blob' || node.type === 'tree'))
       .map((node: any) => ({ path: node.path as string, type: node.type === 'tree' ? 'dir' : 'file', size: node.size }));
@@ -249,8 +251,8 @@ export const githubTools: Record<string, ToolExecutor> = {
     const query = requiredString(args, 'query');
     const { owner, repo } = parseRepo(requiredString(args, 'repo'));
     const pathFilter =
-      typeof args.path === 'string' && args.path.trim()
-        ? ` path:${args.path.trim().replace(/^\/+|\/+$/g, '')}`
+      typeof args.path === 'string' && sanitizeRepoPath(args.path)
+        ? ` path:${sanitizeRepoPath(args.path)}`
         : '';
     const q = `${query} repo:${owner}/${repo}${pathFilter}`;
     const limit = Math.min(Math.max(Number(args.max_results) || 20, 1), 50);
@@ -298,9 +300,10 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   write_file: async (args, ctx) => {
-    const path = requiredString(args, 'path').replace(/^\/+/, '');
-    const content = requiredString(args, 'content');
-    const branch = requiredString(args, 'branch');
+    const path = sanitizeRepoPath(requiredString(args, 'path'));
+    if (!path) throw new Error('path is required (repo-relative, e.g. backend/src/file.ts).');
+    const content = sanitizeFileContent(requiredString(args, 'content'));
+    const branch = requiredString(args, 'branch').trim();
     const message = requiredString(args, 'message');
     if (Buffer.byteLength(content, 'utf8') > 900_000) {
       throw new Error('That file is too large to write through GitHub. Keep it under 900 KB.');
@@ -379,8 +382,9 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   delete_file: async (args, ctx) => {
-    const path = requiredString(args, 'path').replace(/^\/+/, '');
-    const branch = requiredString(args, 'branch');
+    const path = sanitizeRepoPath(requiredString(args, 'path'));
+    if (!path) throw new Error('path is required (repo-relative).');
+    const branch = requiredString(args, 'branch').trim();
     const message = requiredString(args, 'message');
     const headers = githubHeaders(ctx);
     const encoded = encodeRepoPath(path);

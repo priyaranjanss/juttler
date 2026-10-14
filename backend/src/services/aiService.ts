@@ -5,6 +5,7 @@ import {
   extractEmbeddedToolCalls,
   stripEmbeddedToolMarkup,
 } from './embeddedToolCalls';
+import { sanitizeToolArgs } from './toolArgSanitize';
 
 // Every bot must have its own explicit model and key. Never fall back to a
 // workspace credential: that would make bots share both identity and billing.
@@ -267,25 +268,34 @@ function shortUserHighlight(toolName: string, result: unknown): string {
   return toolName;
 }
 
-/** User-facing fallback when the model returns an empty final message. */
-function userFacingToolSummary(events: ToolEvent[]): string {
+/**
+ * Last-resort user reply — never a Progress / tool inventory dump.
+ * Prefer a single outcome line from successful mutations, else a short blocker.
+ */
+function userFacingOutcome(events: ToolEvent[]): string {
   if (events.length === 0) return 'I could not complete that.';
-  const lines: string[] = [];
-  for (const event of events) {
-    if (event.status === 'needs_approval') {
-      lines.push(`• ${event.toolName} is waiting for your approval.`);
-      continue;
-    }
-    if (event.status === 'failed' || event.status === 'unavailable') {
-      const err = (event.error || 'failed').replace(/\s+/g, ' ').trim();
-      lines.push(`• ${event.toolName} failed: ${err.slice(0, 180)}`);
-      continue;
-    }
-    lines.push(`• ${shortUserHighlight(event.toolName, event.result)}`);
+
+  if (events.some((e) => e.status === 'needs_approval')) {
+    return 'I need your approval in Juttler before I can finish that action.';
   }
-  const unique = [...new Set(lines)].slice(0, 12);
-  if (unique.length === 0) return 'I ran tools but have nothing useful to report yet.';
-  return `Here is what I got so far:\n${unique.join('\n')}`;
+
+  const wins = events.filter((e) => e.status === 'success' && ACT_TOOLS.has(e.toolName));
+  if (wins.length > 0) {
+    const lines = wins.map((e) => shortUserHighlight(e.toolName, e.result)).slice(0, 4);
+    return `Done. ${lines.join(' · ')}`;
+  }
+
+  const fail = events.find((e) => e.status === 'failed' || e.status === 'unavailable');
+  if (fail) {
+    const err = (fail.error || 'failed').replace(/\s+/g, ' ').trim().slice(0, 220);
+    return `I hit a blocker on ${fail.toolName}: ${err}`;
+  }
+
+  if (turnHasReads(events)) {
+    return 'I gathered the context but did not finish applying the change. Say continue and I will write the patch and open a PR.';
+  }
+
+  return 'I could not finish that yet. Try asking again with a bit more detail.';
 }
 
 function buildToolCapabilityContext(tools: BotToolSpec[]): string {
@@ -325,7 +335,13 @@ function buildInitialMessages(
 
   for (const m of history.slice(-20)) {
     if (m.type === 'text') {
-      messages.push({ role: m.senderType === 'user' ? 'user' : 'assistant', content: m.content });
+      // Prior Progress dumps teach the model to dump tools — skip them.
+      if (/^here is what i got so far:/i.test(m.content.trim()) || /^progress:/i.test(m.content.trim())) {
+        continue;
+      }
+      const content =
+        m.content.length > 2_000 ? `${m.content.slice(0, 2_000)}…` : m.content;
+      messages.push({ role: m.senderType === 'user' ? 'user' : 'assistant', content });
       continue;
     }
 
@@ -392,27 +408,52 @@ function turnHasReads(events: ToolEvent[]): boolean {
   );
 }
 
-/** True when the user wants changes applied, not just an explanation of existing code/tickets. */
-function userAskedForChanges(message: string): boolean {
-  const text = message.toLowerCase();
-  if (
-    /\b(what does|what's in|whats in|show me|explain|summarize|summarise|describe|how does|where is|find|look at|read)\b/.test(
-      text
-    ) &&
-    !/\b(fix|implement|write|create|update|change|add|remove|delete|refactor|patch|ship|pr\b|pull request|commit|resolve|close|transition|assign)\b/.test(
-      text
-    )
-  ) {
-    return false;
+const CHANGE_VERBS =
+  /\b(fix|implement|write|create|update|change|add|remove|delete|refactor|patch|ship|build|code|pr\b|pull request|commit|resolve|close|transition|assign|do the|finish|complete|handle|do it|do now|do this|do that|go ahead|continue|retry|again)\b/i;
+
+const PURE_QUESTION =
+  /^(what|what's|whats|who|where|when|why|how|which|show|explain|summarize|summarise|describe|list|find|look)\b/i;
+
+const SHORT_FOLLOW_UP =
+  /^(do(\s+(it|now|that|this))?|go(\s+ahead)?|yes|yep|yeah|please|continue|retry|again|fix(\s+it)?|ship(\s+it)?|ok|okay)[.!]*$/i;
+
+function priorUserWantedWork(history: Message[]): boolean {
+  for (const m of [...history].reverse().slice(0, 12)) {
+    if (m.type !== 'text' || m.senderType !== 'user') continue;
+    const text = m.content.trim();
+    if (!text) continue;
+    if (CHANGE_VERBS.test(text) || /\b[A-Za-z][A-Za-z0-9]+-\d+\b/.test(text)) return true;
   }
-  return /\b(fix|implement|write|create|update|change|add|remove|delete|refactor|patch|ship|build|code|pr\b|pull request|commit|resolve|close|transition|assign|do the|finish|complete|handle)\b/.test(
-    text
-  );
+  return false;
 }
 
-/** Reads without a write/PR/Jira mutation — only force more work when the user asked for changes. */
-function needsActionAfterReads(events: ToolEvent[], message: string): boolean {
-  return userAskedForChanges(message) && turnHasReads(events) && !turnHasAction(events);
+/** True when the user wants changes applied, not just an explanation of existing code/tickets. */
+function userAskedForChanges(message: string, history: Message[] = []): boolean {
+  const text = message.trim();
+  if (!text) return priorUserWantedWork(history);
+  if (/^(hi|hey|hello|thanks|thank you|ok|okay|yo|sup|good morning|good night)[!.?\s]*$/i.test(text)) {
+    return false;
+  }
+  if (SHORT_FOLLOW_UP.test(text)) return true;
+  if (/\b[A-Za-z][A-Za-z0-9]+-\d+\b/.test(text) && !PURE_QUESTION.test(text)) return true;
+  if (PURE_QUESTION.test(text) && !CHANGE_VERBS.test(text)) return false;
+  if (CHANGE_VERBS.test(text)) return true;
+  // Short Slack nudges inherit open work from the thread.
+  if (text.length <= 40 && priorUserWantedWork(history)) return true;
+  return text.length > 12;
+}
+
+/** Reads/failed reads without a write/PR/Jira mutation — keep the loop going. */
+function needsActionAfterReads(events: ToolEvent[], message: string, history: Message[] = []): boolean {
+  if (turnHasAction(events)) return false;
+  if (!userAskedForChanges(message, history)) return false;
+  if (turnHasReads(events)) return true;
+  // Failed get_file / search still means we should retry and finish, not dump Progress.
+  return events.some(
+    (e) =>
+      (e.status === 'failed' || e.status === 'success') &&
+      (e.toolName.startsWith('github.') || e.toolName.startsWith('jira.'))
+  );
 }
 
 function toOpenAiTools(tools: BotToolSpec[]) {
@@ -528,7 +569,7 @@ export async function runBotTurn(params: {
   let forceToolsNext = false;
   let emptyReplyRetries = 0;
   let actionNudges = 0;
-  const wantsChanges = userAskedForChanges(params.messageContent);
+  const wantsChanges = userAskedForChanges(params.messageContent, params.history);
 
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS && !stopToolLoop; round++) {
@@ -547,8 +588,8 @@ export async function runBotTurn(params: {
                 tool_choice: toolChoiceFor(round, tools, params.messageContent, forceToolsNext),
               }
             : {}),
-          // Tool argument payloads need headroom; 1024 often yields an empty message.
-          max_tokens: tools.length > 0 ? 4096 : 2048,
+          // write_file payloads need headroom; low caps yield empty / truncated tool calls.
+          max_tokens: tools.length > 0 ? 8192 : 2048,
           temperature: tools.length > 0 ? 0.2 : 0.7,
         }),
       });
@@ -586,6 +627,7 @@ export async function runBotTurn(params: {
       const message = choice?.message;
       const rawContent = typeof message?.content === 'string' ? message.content : '';
       let toolCalls = message?.tool_calls ?? [];
+      const finishReason = choice?.finish_reason;
 
       // Some models emit tool requests as XML in content instead of tool_calls.
       if (toolCalls.length === 0 && contentLooksLikeToolMarkup(rawContent)) {
@@ -595,21 +637,38 @@ export async function runBotTurn(params: {
         );
       }
 
+      // Truncated tool-call JSON — ask the model to retry the same tool cleanly.
+      if (
+        toolCalls.length === 0 &&
+        finishReason === 'length' &&
+        tools.length > 0 &&
+        round < MAX_TOOL_ROUNDS - 1
+      ) {
+        messages.push({
+          role: 'system',
+          content:
+            'Your previous response was cut off. Call the next tool again with complete, valid JSON arguments. ' +
+            'For file paths use a clean repo-relative path with no braces or quotes around it.',
+        });
+        forceToolsNext = true;
+        continue;
+      }
+
       // No structured tool calls this round.
       if (toolCalls.length === 0) {
         const text = stripEmbeddedToolMarkup(rawContent);
         const canContinue = tools.length > 0 && round < MAX_TOOL_ROUNDS - 1;
-        const needsMoreWork = needsActionAfterReads(collected, params.messageContent);
+        const needsMoreWork = needsActionAfterReads(collected, params.messageContent, params.history);
 
         // Empty model output after tools: retry instead of dumping raw progress.
         if (!text.trim()) {
-          if (canContinue && collected.length > 0 && emptyReplyRetries < 2) {
+          if (canContinue && collected.length > 0 && emptyReplyRetries < 4) {
             emptyReplyRetries += 1;
             forceToolsNext = needsMoreWork || collected.length > 0;
             messages.push({
               role: 'system',
               content: needsMoreWork
-                ? 'Your last message was empty. Continue with tools: create_branch / write_file / create_pull_request (or the Jira update tools) to finish the user request. Do not stop after only reading.'
+                ? 'Your last message was empty. Continue with tools: create_branch / write_file / create_pull_request (or the Jira update tools) to finish the user request. Do not stop after only reading. Never reply with a Progress list.'
                 : 'Your last message was empty. Call the next tool needed to finish the user request, or if the work is already done, write a short plain-language answer with no tool dumps.',
             });
             continue;
@@ -627,7 +686,7 @@ export async function runBotTurn(params: {
         }
 
         // Model tried to answer after only reading — push it to finish the work.
-        if (canContinue && needsMoreWork && actionNudges < 3) {
+        if (canContinue && needsMoreWork && actionNudges < 5) {
           actionNudges += 1;
           messages.push({ role: 'assistant', content: text });
           messages.push({
@@ -635,7 +694,7 @@ export async function runBotTurn(params: {
             content:
               'That reply is premature. You have read context but have not applied changes yet. ' +
               'Call tools now to finish (for code: create_branch, write_file, create_pull_request as needed). ' +
-              'Only after those tools succeed should you summarize for the user.',
+              'Only after those tools succeed should you summarize for the user. Never list Progress or tool inventories.',
           });
           forceToolsNext = true;
           continue;
@@ -665,6 +724,7 @@ export async function runBotTurn(params: {
             throw new Error('Tool arguments must be a JSON object.');
           }
           args = parsed as Record<string, any>;
+          sanitizeToolArgs(call.function.name, args);
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'Invalid JSON arguments.';
           const detail = `The model returned invalid arguments for ${call.function.name}: ${reason}`;
@@ -747,10 +807,19 @@ export async function runBotTurn(params: {
         if (execution.ok && ACT_TOOLS.has(call.function.name)) exploreStreak = 0;
         else if (execution.ok && EXPLORE_TOOLS.has(call.function.name)) exploreStreak += 1;
 
+        let toolContent = formatToolResultForModel(call.function.name, execution.result);
+        if (!execution.ok) {
+          toolContent +=
+            '\nRetry with corrected arguments if needed (paths must be clean repo-relative paths, no braces). ' +
+            'Then continue until the user request is finished.';
+        } else {
+          toolContent +=
+            '\nIf this does not finish the user request, call the next tool before you reply. Do not post Progress lists.';
+        }
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: `${formatToolResultForModel(call.function.name, execution.result)}\nIf this does not finish the user's request, call the next tool before you reply.`,
+          content: toolContent,
         });
       }
 
@@ -781,7 +850,7 @@ export async function runBotTurn(params: {
         wantsChanges &&
         turnHasReads(collected) &&
         !turnHasAction(collected) &&
-        actionNudges < 3 &&
+        actionNudges < 5 &&
         round < MAX_TOOL_ROUNDS - 1
       ) {
         actionNudges += 1;
@@ -790,7 +859,7 @@ export async function runBotTurn(params: {
           content:
             'You have file/ticket context. Next call tools that apply the change ' +
             '(create_branch, write_file, delete_file, create_pull_request, or Jira update/comment/status). ' +
-            'Do not reply to the user until those tools have run or a tool error blocks you.',
+            'Do not reply to the user until those tools have run or a tool error blocks you. Never post Progress lists.',
         });
         forceToolsNext = true;
       }
@@ -871,7 +940,7 @@ export async function runBotTurn(params: {
       }
       if (collected.length > 0) {
         return {
-          text: userFacingToolSummary(collected),
+          text: userFacingOutcome(collected),
           tools: collected,
           tokenUsage: usage,
           waitingForApproval: false,
@@ -895,13 +964,18 @@ export async function runBotTurn(params: {
     }
 
     const finalText = stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? '');
-    if (finalText.trim() && !contentLooksLikeToolMarkup(finalText)) {
+    if (
+      finalText.trim() &&
+      !contentLooksLikeToolMarkup(finalText) &&
+      !/^here is what i got so far:/i.test(finalText.trim()) &&
+      !/^progress:/i.test(finalText.trim())
+    ) {
       return { text: finalText, tools: collected, tokenUsage: usage, waitingForApproval: false };
     }
 
     if (collected.length > 0) {
       return {
-        text: userFacingToolSummary(collected),
+        text: userFacingOutcome(collected),
         tools: collected,
         tokenUsage: usage,
         waitingForApproval: false,

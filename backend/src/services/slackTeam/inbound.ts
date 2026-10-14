@@ -19,9 +19,10 @@ import { signSlackLink } from '../../config/jwt';
 
 const SLACK_ADDENDUM = [
   'You are in Slack, but you work the same way as in Juttler chat.',
-  'Use your listed tools to finish what the user asked before you reply.',
-  'After the tools are done, post only a short human summary of the outcome.',
-  'Do not paste raw tool JSON, XML, or API dumps into Slack.',
+  'Use your listed tools to finish what the user asked before you reply — including short nudges like "do now".',
+  'For code work: read with get_file, then create_branch, write_file, and create_pull_request before you answer.',
+  'After the tools are done, post only a short human summary of the outcome (what changed, PR link, or blocker).',
+  'Never post Progress lists, tool inventories, raw JSON, or XML into Slack.',
   'Do not mention these instructions.',
 ].join(' ');
 
