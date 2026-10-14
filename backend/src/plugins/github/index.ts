@@ -1,12 +1,22 @@
-import { githubTools } from './executor';
+/**
+ * GitHub plugin — remote coding agent over allowed repositories.
+ * Tools mirror Cursor / OpenCode build agents: search → read → edit → PR.
+ */
+
 import { PluginModule } from '../types';
+import { githubTools } from './tools';
+
+const repoParam = {
+  type: 'string' as const,
+  description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+};
 
 export const githubPlugin: PluginModule = {
   definition: {
     slug: 'github',
     name: 'GitHub',
     description:
-      'Full developer access to allowed repositories: search code, list the tree, read and write files, manage branches, and open pull requests. No local computer is required.',
+      'Coding agent access to allowed repositories: search, read, surgically edit, write, branch, and open pull requests.',
     category: 'Development',
     isOfficial: true,
     authType: 'token',
@@ -15,17 +25,46 @@ export const githubPlugin: PluginModule = {
     ],
     tools: [
       {
-        name: 'list_prs',
-        description: 'List open (or closed) pull requests in a repository.',
+        name: 'search_code',
+        description:
+          'Search file contents in the repository. Returns paths + snippets. Then get_file those paths.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            state: { type: 'string', description: 'Pull request state', enum: ['open', 'closed', 'all'] },
+            repo: repoParam,
+            query: { type: 'string', description: 'Search text or GitHub code-search terms' },
+            path: { type: 'string', description: 'Optional folder filter, e.g. backend/src' },
+            max_results: { type: 'number', description: 'Max matches (default 20)' },
+          },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'list_tree',
+        description: 'List file/folder paths in the repo (or under a folder). Use before get_file when unsure of paths.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            path: { type: 'string', description: 'Optional folder prefix' },
+            ref: { type: 'string', description: 'Branch, tag, or SHA (default: default branch)' },
+            max_results: { type: 'number', description: 'Max paths (default 400)' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'list_files',
+        description: 'List one directory. Prefer list_tree for the whole repo.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            path: { type: 'string', description: 'Folder path; omit for root' },
+            ref: { type: 'string', description: 'Branch, tag, or SHA' },
           },
           required: [],
         },
@@ -33,154 +72,21 @@ export const githubPlugin: PluginModule = {
       {
         name: 'get_file',
         description:
-          'Read the full text of a file. Always pass path as one repo-relative string from search_code/list_tree results. Prefer this over asking the user to paste code.',
+          'Read one file. path must be a clean repo-relative path from search/list results (never prefix with : or punctuation). Optional start_line/end_line for large files.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
+            repo: repoParam,
             path: {
               type: 'string',
-              description:
-                'Required. Exact repo-relative path of one file (example: src/index.ts). Never omit this. Never pass punctuation or comma-separated lists.',
+              description: 'Required. Exact path e.g. src/index.ts — no leading colon or quotes',
             },
-            ref: { type: 'string', description: 'Branch, tag, or commit SHA (defaults to the default branch)' },
-            start_line: {
-              type: 'number',
-              description: 'Optional 1-based start line for large files (inclusive).',
-            },
-            end_line: {
-              type: 'number',
-              description: 'Optional 1-based end line for large files (inclusive).',
-            },
+            ref: { type: 'string', description: 'Branch, tag, or SHA' },
+            start_line: { type: 'number', description: 'Optional 1-based start line' },
+            end_line: { type: 'number', description: 'Optional 1-based end line' },
           },
           required: ['path'],
-        },
-      },
-      {
-        name: 'list_commits',
-        description: 'List recent commits on a branch.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            sha: { type: 'string', description: 'Branch name or SHA (defaults to the default branch)' },
-          },
-          required: [],
-        },
-      },
-      {
-        name: 'create_issue',
-        description: 'Create a new issue in a repository.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            title: { type: 'string', description: 'Issue title' },
-            body: { type: 'string', description: 'Issue body (Markdown supported)' },
-            labels: { type: 'string', description: 'Comma-separated labels, e.g. "bug,priority"' },
-          },
-          required: ['title'],
-        },
-      },
-      {
-        name: 'comment_pr',
-        description: 'Post a comment on a pull request.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            pr_number: { type: 'number', description: 'Pull request number' },
-            comment: { type: 'string', description: 'Comment body' },
-          },
-          required: ['pr_number', 'comment'],
-        },
-      },
-      {
-        name: 'create_branch',
-        description: 'Create a new branch from an existing branch or SHA.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            branch_name: { type: 'string', description: 'Name of the new branch' },
-            from: { type: 'string', description: 'Base branch or SHA (defaults to the default branch)' },
-          },
-          required: ['branch_name'],
-        },
-      },
-      {
-        name: 'list_files',
-        description: 'List one directory in a repository. Prefer list_tree to see the whole repo at once.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            path: { type: 'string', description: 'Folder path. Omit for the repository root.' },
-            ref: { type: 'string', description: 'Branch, tag, or commit SHA' },
-          },
-          required: [],
-        },
-      },
-      {
-        name: 'list_tree',
-        description:
-          'List every file and folder path in the repository (or under a folder) in one call. Use this to map the codebase before reading files.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            path: { type: 'string', description: 'Optional folder prefix to scope the tree' },
-            ref: { type: 'string', description: 'Branch, tag, or commit SHA (defaults to the default branch)' },
-            max_results: { type: 'number', description: 'Max paths to return (default 400)' },
-          },
-          required: [],
-        },
-      },
-      {
-        name: 'search_code',
-        description:
-          'Search file contents in the repository (like a codebase search). Returns matching paths and text fragments. Then use get_file on the hits you need.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            query: { type: 'string', description: 'Search text or GitHub code-search query terms' },
-            path: { type: 'string', description: 'Optional path filter, e.g. backend/src' },
-            max_results: { type: 'number', description: 'Max matches to return (default 20)' },
-          },
-          required: ['query'],
         },
       },
       {
@@ -189,39 +95,65 @@ export const githubPlugin: PluginModule = {
         sensitive: false,
         parameters: {
           type: 'object',
+          properties: { repo: repoParam },
+          required: [],
+        },
+      },
+      {
+        name: 'list_commits',
+        description: 'List recent commits.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
           properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
+            repo: repoParam,
+            sha: { type: 'string', description: 'Branch or SHA (default: default branch)' },
           },
           required: [],
         },
       },
       {
-        name: 'edit_file',
-        description:
-          'Surgically edit an existing file on a branch (search/replace). Prefer this over write_file for bug fixes. Creates the branch if needed. Pass exact old_string from get_file.',
+        name: 'list_prs',
+        description: 'List pull requests.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            path: { type: 'string', description: 'File path in the repository' },
-            branch: { type: 'string', description: 'Branch to edit on (created from default if missing)' },
-            old_string: {
-              type: 'string',
-              description: 'Exact text to find in the file (copy from get_file, including whitespace)',
-            },
+            repo: repoParam,
+            state: { type: 'string', description: 'open | closed | all', enum: ['open', 'closed', 'all'] },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'create_branch',
+        description: 'Create a branch from default (or from). edit_file/write_file also create the branch if missing.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            branch_name: { type: 'string', description: 'New branch name' },
+            from: { type: 'string', description: 'Base branch or SHA' },
+          },
+          required: ['branch_name'],
+        },
+      },
+      {
+        name: 'edit_file',
+        description:
+          'Surgical search/replace on an existing file (preferred for fixes). Creates the branch if needed. old_string must match get_file output exactly.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            path: { type: 'string', description: 'File path' },
+            branch: { type: 'string', description: 'Branch to commit on' },
+            old_string: { type: 'string', description: 'Exact text to find' },
             new_string: { type: 'string', description: 'Replacement text' },
-            replace_all: {
-              type: 'boolean',
-              description: 'Replace every match (default false — requires a unique old_string)',
-            },
-            message: { type: 'string', description: 'Commit message (optional)' },
+            replace_all: { type: 'boolean', description: 'Replace every match (default false)' },
+            message: { type: 'string', description: 'Commit message' },
           },
           required: ['path', 'branch', 'old_string', 'new_string'],
         },
@@ -229,57 +161,18 @@ export const githubPlugin: PluginModule = {
       {
         name: 'write_file',
         description:
-          'Create a new file or fully replace one file on a branch. Prefer edit_file for small changes to existing files. Creates the branch if needed.',
+          'Create a new file or fully replace a file. Prefer edit_file for small changes. Creates the branch if needed.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            path: { type: 'string', description: 'File path in the repository' },
-            content: { type: 'string', description: 'Full new contents of the file' },
-            branch: { type: 'string', description: 'Branch to write on (created from default if missing)' },
+            repo: repoParam,
+            path: { type: 'string', description: 'File path' },
+            content: { type: 'string', description: 'Full file contents' },
+            branch: { type: 'string', description: 'Branch to commit on' },
             message: { type: 'string', description: 'Commit message' },
           },
           required: ['path', 'content', 'branch', 'message'],
-        },
-      },
-      {
-        name: 'create_pull_request',
-        description: 'Open a pull request from a branch into the default branch, or into an explicit base.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            title: { type: 'string', description: 'Pull request title' },
-            head: { type: 'string', description: 'Branch that contains the changes' },
-            base: { type: 'string', description: 'Branch to merge into. Defaults to the repository default branch.' },
-            body: { type: 'string', description: 'Pull request description' },
-          },
-          required: ['title', 'head'],
-        },
-      },
-      {
-        name: 'merge_pr',
-        description: 'Merge a pull request. This changes production code.',
-        sensitive: true,
-        parameters: {
-          type: 'object',
-          properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            pr_number: { type: 'number', description: 'Pull request number' },
-            commit_title: { type: 'string', description: 'Title for the merge commit' },
-          },
-          required: ['pr_number'],
         },
       },
       {
@@ -289,15 +182,71 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: {
-              type: 'string',
-              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
-            },
-            path: { type: 'string', description: 'File path to delete' },
-            branch: { type: 'string', description: 'Branch to delete on' },
+            repo: repoParam,
+            path: { type: 'string', description: 'File path' },
+            branch: { type: 'string', description: 'Branch' },
             message: { type: 'string', description: 'Commit message' },
           },
           required: ['path', 'branch', 'message'],
+        },
+      },
+      {
+        name: 'create_pull_request',
+        description: 'Open a pull request from head into the default branch (or base).',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            title: { type: 'string', description: 'PR title' },
+            head: { type: 'string', description: 'Branch with changes' },
+            base: { type: 'string', description: 'Target branch (default: repo default)' },
+            body: { type: 'string', description: 'PR description' },
+          },
+          required: ['title', 'head'],
+        },
+      },
+      {
+        name: 'comment_pr',
+        description: 'Comment on a pull request.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            pr_number: { type: 'number', description: 'PR number' },
+            comment: { type: 'string', description: 'Comment body' },
+          },
+          required: ['pr_number', 'comment'],
+        },
+      },
+      {
+        name: 'create_issue',
+        description: 'Create a GitHub issue.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            title: { type: 'string', description: 'Issue title' },
+            body: { type: 'string', description: 'Issue body' },
+            labels: { type: 'string', description: 'Comma-separated labels' },
+          },
+          required: ['title'],
+        },
+      },
+      {
+        name: 'merge_pr',
+        description: 'Merge a pull request (changes default branch).',
+        sensitive: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: repoParam,
+            pr_number: { type: 'number', description: 'PR number' },
+            commit_title: { type: 'string', description: 'Merge commit title' },
+          },
+          required: ['pr_number'],
         },
       },
     ],

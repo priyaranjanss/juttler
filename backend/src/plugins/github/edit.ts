@@ -1,6 +1,5 @@
 /**
- * Surgical file edits (Cursor/OpenCode-style search_replace).
- * Pure helpers — no GitHub I/O here so they are easy to unit test.
+ * Surgical search/replace — same idea as Cursor edit / OpenCode edit tools.
  */
 
 export interface SearchReplaceResult {
@@ -8,10 +7,6 @@ export interface SearchReplaceResult {
   replacements: number;
 }
 
-/**
- * Replace old_string with new_string in file content.
- * Fails clearly when the anchor is missing or ambiguous (unless replace_all).
- */
 export function applySearchReplace(
   content: string,
   oldString: string,
@@ -28,7 +23,7 @@ export function applySearchReplace(
   const occurrences = content.split(oldString).length - 1;
   if (occurrences === 0) {
     throw new Error(
-      'old_string was not found in the file. Re-read with get_file and copy the exact text to replace (including whitespace).'
+      'old_string was not found in the file. Re-read with get_file and copy the exact text (including whitespace).'
     );
   }
   if (occurrences > 1 && !replaceAll) {
