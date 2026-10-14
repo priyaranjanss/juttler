@@ -11,7 +11,7 @@ import { sanitizeFileContent, sanitizeRepoPath } from '../../services/toolArgSan
 
 /** Accepts "owner/name" or a full GitHub URL. */
 function parseRepo(value: string): { owner: string; repo: string } {
-  const cleaned = value.replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '').replace(/\/$/, '');
+  const cleaned = value.replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/$/, '');
   const [owner, repo, ...rest] = cleaned.split('/');
   if (!owner || !repo || rest.length > 0) {
     throw new Error(`"${value}" is not a repository. Use owner/name form, e.g. "octocat/Hello-World".`);
@@ -40,17 +40,68 @@ function githubHeaders(ctx: { credential: Record<string, any> }): Record<string,
   return {
     Authorization: `Bearer ${ctx.credential.token}`,
     'X-GitHub-Api-Version': '2022-11-28',
+    Accept: 'application/vnd.github+json',
     'User-Agent': 'juttler-bot',
   };
 }
 
+/** Strip model junk from branch names. */
+function sanitizeBranchName(raw: string): string {
+  return String(raw ?? '')
+    .trim()
+    .replace(/^[\s`"'{\\}]+|[\s`"'{\\}]+$/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/^refs\/heads\//i, '');
+}
+
+/** Resolve a branch name or commit SHA to a commit SHA. */
+async function resolveCommitSha(
+  args: Record<string, any>,
+  headers: Record<string, string>,
+  refName: string
+): Promise<string> {
+  const name = sanitizeBranchName(refName);
+  try {
+    const ref = await requestJson(`${repoUrl(args, `/git/ref/heads/${encodeURIComponent(name)}`)}`, {
+      headers,
+    });
+    if (ref.object?.sha) return ref.object.sha as string;
+  } catch {
+    // Fall through — might be a tag or commit SHA.
+  }
+  try {
+    const ref = await requestJson(`${repoUrl(args, `/git/ref/tags/${encodeURIComponent(name)}`)}`, {
+      headers,
+    });
+    if (ref.object?.sha) {
+      if (ref.object.type === 'commit') return ref.object.sha as string;
+      const tag = await requestJson(`${repoUrl(args, `/git/tags/${ref.object.sha}`)}`, { headers });
+      if (tag.object?.sha) return tag.object.sha as string;
+      return ref.object.sha as string;
+    }
+  } catch {
+    // Fall through to commits API.
+  }
+  const commit = await requestJson(`${repoUrl(args, `/commits/${encodeURIComponent(name)}`)}`, {
+    headers,
+  });
+  const sha = commit.sha ?? commit.commit?.tree?.sha;
+  if (!sha) throw new Error(`Could not resolve "${refName}" to a commit.`);
+  return sha as string;
+}
+
+function isAlreadyExists(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /\(422\)/.test(message) && /already exists|Reference already exists/i.test(message);
+}
+
 export const githubTools: Record<string, ToolExecutor> = {
   list_prs: async (args, ctx) => {
-    // state is optional - the model often sends only `repo`.
     const state = typeof args.state === 'string' && args.state.trim() ? args.state.trim() : 'open';
-    const data = await requestJson(`${repoUrl(args, '/pulls')}?state=${encodeURIComponent(state)}&per_page=30`, {
-      headers: githubHeaders(ctx),
-    });
+    const data = await requestJson(
+      `${repoUrl(args, '/pulls')}?state=${encodeURIComponent(state)}&per_page=30`,
+      { headers: githubHeaders(ctx) }
+    );
     return {
       repo: requiredString(args, 'repo'),
       state,
@@ -88,8 +139,9 @@ export const githubTools: Record<string, ToolExecutor> = {
     if (typeof data.content === 'string' && data.content.length > 0) {
       content = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
     } else if (typeof data.download_url === 'string' && data.download_url) {
-      // Larger files omit base64 `content`; fetch the raw file instead.
-      const downloaded = await fetch(data.download_url, { headers });
+      const downloaded = await fetch(data.download_url, {
+        headers: { Authorization: headers.Authorization, 'User-Agent': headers['User-Agent'] },
+      });
       if (!downloaded.ok) {
         throw new Error(`GET ${path} download failed (${downloaded.status})`);
       }
@@ -102,7 +154,6 @@ export const githubTools: Record<string, ToolExecutor> = {
       );
     }
 
-    // Keep a large readable slice for the model; note when the file is longer.
     const maxChars = 100_000;
     const truncated = content.length > maxChars;
     return {
@@ -116,8 +167,9 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   list_commits: async (args, ctx) => {
-    const sha = args.sha ? `?sha=${encodeURIComponent(String(args.sha))}` : '';
-    const data = await requestJson(`${repoUrl(args, '/commits')}${sha}&per_page=30`, {
+    const params = new URLSearchParams({ per_page: '30' });
+    if (args.sha) params.set('sha', String(args.sha));
+    const data = await requestJson(`${repoUrl(args, '/commits')}?${params}`, {
       headers: githubHeaders(ctx),
     });
     return {
@@ -152,7 +204,6 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   comment_pr: async (args, ctx) => {
-    // PRs are issues on the GitHub API, so comments go through /issues/:n/comments.
     const prNumber = requiredString(args, 'pr_number');
     const data = await requestJson(repoUrl(args, `/issues/${prNumber}/comments`), {
       method: 'POST',
@@ -163,29 +214,30 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   create_branch: async (args, ctx) => {
-    const branchName = requiredString(args, 'branch_name');
+    const branchName = sanitizeBranchName(requiredString(args, 'branch_name'));
+    if (!branchName) throw new Error('branch_name is required.');
     const headers = githubHeaders(ctx);
 
-    // Resolve the base ref: an explicit branch/SHA wins, else the default branch.
     const repoInfo = await requestJson(repoUrl(args), { headers });
     const from = args.from ? String(args.from) : repoInfo.default_branch;
     if (!from) {
       throw new Error('Could not determine the default branch. Pass an explicit "from" branch or SHA.');
     }
 
-    const ref = await requestJson(`${repoUrl(args, `/git/ref/heads/${from}`)}`, { headers });
-    const baseSha: string = ref.object?.sha;
-    if (!baseSha) {
-      throw new Error(`Could not resolve branch "${from}" to a commit.`);
+    const baseSha = await resolveCommitSha(args, headers, from);
+
+    try {
+      await requestJson(repoUrl(args, '/git/refs'), {
+        method: 'POST',
+        headers,
+        body: { ref: `refs/heads/${branchName}`, sha: baseSha },
+      });
+      return { created: true, branch: branchName, from_sha: baseSha, existed: false };
+    } catch (err) {
+      if (!isAlreadyExists(err)) throw err;
+      // Branch already exists — continue the workflow (write_file / PR) on it.
+      return { created: false, branch: branchName, from_sha: baseSha, existed: true };
     }
-
-    await requestJson(repoUrl(args, '/git/refs'), {
-      method: 'POST',
-      headers,
-      body: { ref: `refs/heads/${branchName}`, sha: baseSha },
-    });
-
-    return { created: true, branch: branchName, from_sha: baseSha };
   },
 
   list_files: async (args, ctx) => {
@@ -212,25 +264,16 @@ export const githubTools: Record<string, ToolExecutor> = {
     const refName = args.ref ? String(args.ref) : repoInfo.default_branch;
     if (!refName) throw new Error('Could not determine the default branch.');
 
-    let sha: string | null = null;
-    try {
-      const ref = await requestJson(`${repoUrl(args, `/git/ref/heads/${encodeURIComponent(refName)}`)}`, {
-        headers,
-      });
-      sha = ref.object?.sha ?? null;
-    } catch {
-      const commit = await requestJson(`${repoUrl(args, `/commits/${encodeURIComponent(refName)}`)}`, {
-        headers,
-      });
-      sha = commit.sha ?? commit.commit?.tree?.sha ?? null;
-    }
-    if (!sha) throw new Error(`Could not resolve ref "${refName}".`);
-
+    const sha = await resolveCommitSha(args, headers, refName);
     const tree = await requestJson(`${repoUrl(args, `/git/trees/${sha}`)}?recursive=1`, { headers });
     const prefix = typeof args.path === 'string' ? sanitizeRepoPath(args.path).replace(/\/+$/g, '') : '';
     let paths = (tree.tree ?? [])
       .filter((node: any) => node?.path && (node.type === 'blob' || node.type === 'tree'))
-      .map((node: any) => ({ path: node.path as string, type: node.type === 'tree' ? 'dir' : 'file', size: node.size }));
+      .map((node: any) => ({
+        path: node.path as string,
+        type: node.type === 'tree' ? 'dir' : 'file',
+        size: node.size,
+      }));
     if (prefix) {
       paths = paths.filter(
         (node: { path: string }) => node.path === prefix || node.path.startsWith(`${prefix}/`)
@@ -281,6 +324,10 @@ export const githubTools: Record<string, ToolExecutor> = {
       total: typeof data.total_count === 'number' ? data.total_count : items.length,
       returned: items.length,
       results: items,
+      hint:
+        items.length > 0
+          ? 'Call github.get_file on the paths you need, then write_file / create_pull_request to finish.'
+          : 'No matches. Try a shorter query or list_tree, then get_file.',
     };
   },
 
@@ -303,8 +350,9 @@ export const githubTools: Record<string, ToolExecutor> = {
     const path = sanitizeRepoPath(requiredString(args, 'path'));
     if (!path) throw new Error('path is required (repo-relative, e.g. backend/src/file.ts).');
     const content = sanitizeFileContent(requiredString(args, 'content'));
-    const branch = requiredString(args, 'branch').trim();
+    const branch = sanitizeBranchName(requiredString(args, 'branch'));
     const message = requiredString(args, 'message');
+    if (!branch) throw new Error('branch is required.');
     if (Buffer.byteLength(content, 'utf8') > 900_000) {
       throw new Error('That file is too large to write through GitHub. Keep it under 900 KB.');
     }
@@ -348,24 +396,48 @@ export const githubTools: Record<string, ToolExecutor> = {
   create_pull_request: async (args, ctx) => {
     const headers = githubHeaders(ctx);
     const repoInfo = await requestJson(repoUrl(args), { headers });
-    const base = args.base ? String(args.base) : repoInfo.default_branch;
-    const data = await requestJson(repoUrl(args, '/pulls'), {
-      method: 'POST',
-      headers,
-      body: {
-        title: requiredString(args, 'title'),
-        head: requiredString(args, 'head'),
-        base,
-        body: args.body ? String(args.body) : '',
-      },
-    });
-    return {
-      created: true,
-      number: data.number,
-      url: data.html_url,
-      head: data.head?.ref,
-      base: data.base?.ref,
-    };
+    const base = args.base ? sanitizeBranchName(String(args.base)) : repoInfo.default_branch;
+    const head = sanitizeBranchName(requiredString(args, 'head'));
+    const title = requiredString(args, 'title');
+    const body = args.body ? String(args.body) : '';
+
+    try {
+      const data = await requestJson(repoUrl(args, '/pulls'), {
+        method: 'POST',
+        headers,
+        body: { title, head, base, body },
+      });
+      return {
+        created: true,
+        number: data.number,
+        url: data.html_url,
+        head: data.head?.ref,
+        base: data.base?.ref,
+        existed: false,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/\(422\)/.test(message)) throw err;
+      // PR may already exist for this head — return it so the turn can finish.
+      const existing = await requestJson(
+        `${repoUrl(args, '/pulls')}?state=open&head=${encodeURIComponent(
+          `${parseRepo(requiredString(args, 'repo')).owner}:${head}`
+        )}&per_page=5`,
+        { headers }
+      );
+      const pr = Array.isArray(existing) ? existing[0] : null;
+      if (pr?.html_url) {
+        return {
+          created: false,
+          number: pr.number,
+          url: pr.html_url,
+          head: pr.head?.ref,
+          base: pr.base?.ref,
+          existed: true,
+        };
+      }
+      throw err;
+    }
   },
 
   merge_pr: async (args, ctx) => {
@@ -384,8 +456,9 @@ export const githubTools: Record<string, ToolExecutor> = {
   delete_file: async (args, ctx) => {
     const path = sanitizeRepoPath(requiredString(args, 'path'));
     if (!path) throw new Error('path is required (repo-relative).');
-    const branch = requiredString(args, 'branch').trim();
+    const branch = sanitizeBranchName(requiredString(args, 'branch'));
     const message = requiredString(args, 'message');
+    if (!branch) throw new Error('branch is required.');
     const headers = githubHeaders(ctx);
     const encoded = encodeRepoPath(path);
     const existing = await requestJson(

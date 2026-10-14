@@ -8,6 +8,7 @@
 
 import { requiredString, optionalNumber, requestJson } from '../shared';
 import { ToolExecutor } from '../shared';
+import { normalizeJql, pickIssueKeyArg } from './jql';
 
 /** Jira is per-site, so the base URL comes from the stored credential. */
 function jiraBase(ctx: { credential: Record<string, any> }): string {
@@ -18,21 +19,6 @@ function jiraBase(ctx: { credential: Record<string, any> }): string {
   let host = String(site).trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   if (!host.includes('.')) host = `${host}.atlassian.net`;
   return `https://${host}`;
-}
-
-/**
- * Normalize an issue key from whatever the model passes.
- * Pulls out PROJ-123 when present; rejects junk like "}}-9".
- */
-function issueKey(value: string): string {
-  const upper = String(value ?? '').trim().toUpperCase();
-  const match = upper.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
-  if (match) return match[1];
-  const cleaned = upper.replace(/[^A-Z0-9-]/g, '');
-  if (/^[A-Z][A-Z0-9]+-\d+$/.test(cleaned)) return cleaned;
-  throw new Error(
-    `"${value}" is not a Jira issue key. Use a key like ABC-123.`
-  );
 }
 
 /** Flattens Atlassian document JSON into plain text for the model. */
@@ -53,13 +39,23 @@ function jiraHeaders(ctx: { credential: Record<string, any> }): Record<string, s
   return { Authorization: `Basic ${basic}`, Accept: 'application/json' };
 }
 
-/** Jira's v3 description format (Atlassian Document Format). */
+/** Jira's v3 description/comment format (Atlassian Document Format). */
 function plainTextDoc(text: string) {
-  return {
-    type: 'doc',
-    version: 1,
-    content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
-  };
+  const paragraphs = String(text)
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}|\n/)
+    .map((line) => line.trimEnd())
+    .filter((line, index, all) => line.length > 0 || all.length === 1);
+
+  const content =
+    paragraphs.length === 0
+      ? [{ type: 'paragraph', content: [{ type: 'text', text: '' }] }]
+      : paragraphs.map((line) => ({
+          type: 'paragraph',
+          content: line ? [{ type: 'text', text: line }] : [],
+        }));
+
+  return { type: 'doc', version: 1, content };
 }
 
 async function jiraAccount(base: string, headers: Record<string, string>): Promise<{ name: string; email: string }> {
@@ -67,16 +63,52 @@ async function jiraAccount(base: string, headers: Record<string, string>): Promi
   return { name: me.displayName || me.name || '', email: me.emailAddress || '' };
 }
 
+const SEARCH_FIELDS = ['summary', 'status', 'assignee', 'priority', 'issuetype', 'project', 'updated'];
+
 /**
- * Enhanced search rejects unbounded JQL with 400.
- * Always include at least one real filter clause.
+ * Jira Cloud tenants disagree on search payloads. Try enhanced search first,
+ * then classic /search, so a 400 on one shape does not block ticket work.
  */
-function boundedJql(raw: unknown): string {
-  const trimmed = typeof raw === 'string' ? raw.trim() : '';
-  if (!trimmed) return 'updated >= -120d ORDER BY updated DESC';
-  // Bare ORDER BY / empty filters are unbounded.
-  if (/^order\s+by\b/i.test(trimmed)) return `updated >= -120d ${trimmed}`;
-  return trimmed;
+async function searchIssues(
+  base: string,
+  headers: Record<string, string>,
+  jql: string,
+  limit: number
+): Promise<any> {
+  const attempts: Array<{ url: string; body: Record<string, unknown> }> = [
+    { url: `${base}/rest/api/3/search/jql`, body: { jql, maxResults: limit } },
+    {
+      url: `${base}/rest/api/3/search/jql`,
+      body: { jql, maxResults: limit, fields: SEARCH_FIELDS },
+    },
+    {
+      url: `${base}/rest/api/3/search`,
+      body: { jql, maxResults: limit, startAt: 0, fields: SEARCH_FIELDS },
+    },
+  ];
+
+  let lastError: Error | null = null;
+  for (const attempt of attempts) {
+    try {
+      return await requestJson(attempt.url, {
+        method: 'POST',
+        headers,
+        body: attempt.body,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      lastError = err instanceof Error ? err : new Error(message);
+      if (!/\(400\)|\(404\)|\(410\)/.test(message)) throw lastError;
+    }
+  }
+  throw lastError ?? new Error('Jira search failed.');
+}
+
+/** Preferred project from work desk, if the gateway injected it. */
+function preferredProject(args: Record<string, any>): string | null {
+  const raw = args._preferredProject ?? args.preferred_project;
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  return raw.trim().toUpperCase();
 }
 
 export const jiraTools: Record<string, ToolExecutor> = {
@@ -97,19 +129,11 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   search_tickets: async (args, ctx) => {
-    const jql = boundedJql(args.jql);
+    const jql = normalizeJql(args.jql, preferredProject(args));
     const limit = optionalNumber(args, 'max_results', 20, 100);
     const base = jiraBase(ctx);
     const headers = jiraHeaders(ctx);
-    const found = await requestJson(`${base}/rest/api/3/search/jql`, {
-      method: 'POST',
-      headers,
-      body: {
-        jql,
-        maxResults: limit,
-        fields: ['summary', 'status', 'assignee', 'priority', 'issuetype', 'project', 'updated'],
-      },
-    });
+    const found = await searchIssues(base, headers, jql, limit);
     let total: number | undefined;
     try {
       const counted = await requestJson(`${base}/rest/api/3/search/approximate-count`, {
@@ -132,22 +156,33 @@ export const jiraTools: Record<string, ToolExecutor> = {
       url: `${base}/browse/${issue.key}`,
     }));
     return {
-      total: total ?? issues.length,
+      total: total ?? (typeof found.total === 'number' ? found.total : issues.length),
       returned: issues.length,
       jql,
       account,
       issues,
+      hint:
+        issues.length === 1
+          ? `Use jira.get_ticket with issue_key=${issues[0].key} to read the full description.`
+          : undefined,
     };
   },
 
   create_ticket: async (args, ctx) => {
     const base = jiraBase(ctx);
+    const project =
+      (typeof args.project === 'string' && args.project.trim()
+        ? args.project.trim().toUpperCase()
+        : null) || preferredProject(args);
+    if (!project) {
+      throw new Error('project is required (e.g. ABC). Call jira.list_projects if unsure.');
+    }
     const data = await requestJson(`${base}/rest/api/3/issue`, {
       method: 'POST',
       headers: jiraHeaders(ctx),
       body: {
         fields: {
-          project: { key: requiredString(args, 'project').toUpperCase() },
+          project: { key: project },
           summary: requiredString(args, 'summary'),
           issuetype: { name: args.issue_type ? String(args.issue_type) : 'Task' },
           ...(args.description ? { description: plainTextDoc(String(args.description)) } : {}),
@@ -158,7 +193,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   update_ticket: async (args, ctx) => {
-    const key = issueKey(requiredString(args, 'issue_key'));
+    const key = pickIssueKeyArg(args);
     const fields: Record<string, any> = {};
     if (args.summary) fields.summary = String(args.summary);
     if (args.description) fields.description = plainTextDoc(String(args.description));
@@ -174,7 +209,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   list_transitions: async (args, ctx) => {
-    const key = issueKey(requiredString(args, 'issue_key'));
+    const key = pickIssueKeyArg(args);
     const base = jiraBase(ctx);
     const data = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
       headers: jiraHeaders(ctx),
@@ -188,7 +223,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   change_status: async (args, ctx) => {
-    const key = issueKey(requiredString(args, 'issue_key'));
+    const key = pickIssueKeyArg(args);
     const wanted = requiredString(args, 'transition').trim().toLowerCase();
     const base = jiraBase(ctx);
     const headers = jiraHeaders(ctx);
@@ -228,7 +263,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   get_ticket: async (args, ctx) => {
-    const key = issueKey(requiredString(args, 'issue_key'));
+    const key = pickIssueKeyArg(args);
     const base = jiraBase(ctx);
     const data = await requestJson(
       `${base}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,priority,description,comment,issuetype,project`,
@@ -254,7 +289,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   add_comment: async (args, ctx) => {
-    const key = issueKey(requiredString(args, 'issue_key'));
+    const key = pickIssueKeyArg(args);
     const base = jiraBase(ctx);
     const data = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
       method: 'POST',
@@ -265,7 +300,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   assign_ticket: async (args, ctx) => {
-    const key = issueKey(requiredString(args, 'issue_key'));
+    const key = pickIssueKeyArg(args);
     const who = requiredString(args, 'assignee');
     const base = jiraBase(ctx);
     const headers = jiraHeaders(ctx);

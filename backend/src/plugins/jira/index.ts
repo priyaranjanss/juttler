@@ -23,14 +23,16 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'search_tickets',
-        description: 'Search Jira issues with JQL. Omit jql to search recent issues. Queries need at least one filter.',
+        description:
+          'Search issues with JQL when you do not already know the issue key. If the user named a key like ABC-123, use get_ticket instead.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
             jql: {
               type: 'string',
-              description: 'JQL with at least one filter (project, key, status, updated, …). Empty searches recent issues.',
+              description:
+                'Valid JQL (e.g. key = ABC-123, project = ABC AND status = "To Do"). A bare issue key is OK and will be rewritten. Empty searches recent issues.',
             },
             max_results: { type: 'number', description: 'How many matching issues to include.' },
           },
@@ -44,12 +46,15 @@ export const jiraPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            project: { type: 'string', description: 'Project key, e.g. "ABC"' },
+            project: {
+              type: 'string',
+              description: 'Project key, e.g. "ABC". Omit when this bot has a preferred Jira project.',
+            },
             summary: { type: 'string', description: 'Issue summary' },
             issue_type: { type: 'string', description: 'Issue type, e.g. "Task" or "Bug"' },
             description: { type: 'string', description: 'Issue description' },
           },
-          required: ['project', 'summary'],
+          required: ['summary'],
         },
       },
       {
@@ -59,7 +64,10 @@ export const jiraPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            issue_key: {
+              type: 'string',
+              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
+            },
             summary: { type: 'string', description: 'New summary' },
             description: { type: 'string', description: 'New description' },
           },
@@ -73,7 +81,10 @@ export const jiraPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            issue_key: {
+              type: 'string',
+              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
+            },
           },
           required: ['issue_key'],
         },
@@ -86,7 +97,10 @@ export const jiraPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            issue_key: {
+              type: 'string',
+              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
+            },
             transition: { type: 'string', description: 'Transition name or target status name' },
           },
           required: ['issue_key', 'transition'],
@@ -94,12 +108,16 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'get_ticket',
-        description: 'Read one issue by key, including description and comments.',
+        description:
+          'Read one issue by key (summary, description, comments). Prefer this whenever the user names a key like ABC-123 — do not search first.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            issue_key: {
+              type: 'string',
+              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
+            },
           },
           required: ['issue_key'],
         },
@@ -111,7 +129,10 @@ export const jiraPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            issue_key: {
+              type: 'string',
+              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
+            },
             comment: { type: 'string', description: 'Comment text' },
           },
           required: ['issue_key', 'comment'],
@@ -124,7 +145,10 @@ export const jiraPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            issue_key: {
+              type: 'string',
+              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
+            },
             assignee: { type: 'string', description: 'Display name, email, or Atlassian account id' },
           },
           required: ['issue_key', 'assignee'],

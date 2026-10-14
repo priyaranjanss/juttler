@@ -456,6 +456,13 @@ function needsActionAfterReads(events: ToolEvent[], message: string, history: Me
   );
 }
 
+/** Model wrote a plan / asked permission instead of calling write tools. */
+function isAskingPermissionToAct(text: string): boolean {
+  return /\b(if you('d| would)? like|shall i|should i|want me to|let me know if|happy to (implement|proceed|fix)|i can (implement|fix|proceed|make)|would you like me to|can implement those|i can implement)\b/i.test(
+    text
+  );
+}
+
 function toOpenAiTools(tools: BotToolSpec[]) {
   return tools.map((t) => ({
     type: 'function',
@@ -569,6 +576,7 @@ export async function runBotTurn(params: {
   let forceToolsNext = false;
   let emptyReplyRetries = 0;
   let actionNudges = 0;
+  let gatewayEmptyRetries = 0;
   const wantsChanges = userAskedForChanges(params.messageContent, params.history);
 
   try {
@@ -624,7 +632,31 @@ export async function runBotTurn(params: {
       }
 
       const choice = data.choices?.[0];
-      const message = choice?.message;
+      // Empty choices from the LLM gateway — retry instead of failing the turn.
+      if (!choice?.message) {
+        if (gatewayEmptyRetries < 3 && round < MAX_TOOL_ROUNDS - 1) {
+          gatewayEmptyRetries += 1;
+          messages.push({
+            role: 'system',
+            content:
+              'The previous model response was empty. Continue the user request with the next tool call now. Prefer get_ticket for named issue keys, then GitHub write tools to finish.',
+          });
+          forceToolsNext = tools.length > 0;
+          continue;
+        }
+        if (collected.length > 0) {
+          stopToolLoop = true;
+          break;
+        }
+        return {
+          tools: collected,
+          tokenUsage: usage,
+          waitingForApproval: false,
+          error: { kind: 'bad_response', message: 'Gateway returned no content.' },
+        };
+      }
+
+      const message = choice.message;
       const rawContent = typeof message?.content === 'string' ? message.content : '';
       let toolCalls = message?.tool_calls ?? [];
       const finishReason = choice?.finish_reason;
@@ -694,7 +726,26 @@ export async function runBotTurn(params: {
             content:
               'That reply is premature. You have read context but have not applied changes yet. ' +
               'Call tools now to finish (for code: create_branch, write_file, create_pull_request as needed). ' +
-              'Only after those tools succeed should you summarize for the user. Never list Progress or tool inventories.',
+              'Only after those tools succeed should you summarize for the user. Never list Progress or tool inventories. Never ask permission to proceed.',
+          });
+          forceToolsNext = true;
+          continue;
+        }
+
+        // Diagnosed the bug but asked "shall I proceed?" — force the write path.
+        if (
+          canContinue &&
+          wantsChanges &&
+          isAskingPermissionToAct(text) &&
+          actionNudges < 5
+        ) {
+          actionNudges += 1;
+          messages.push({ role: 'assistant', content: text });
+          messages.push({
+            role: 'system',
+            content:
+              'Do not ask for permission. The user already asked you to do the work. ' +
+              'Call create_branch, write_file, and create_pull_request now (and Jira comment/status if useful).',
           });
           forceToolsNext = true;
           continue;

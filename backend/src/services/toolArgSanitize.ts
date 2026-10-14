@@ -33,7 +33,7 @@ export function sanitizeFileContent(raw: string): string {
   return fenced ? fenced[1] : text;
 }
 
-/** Mutates known string args in place for GitHub (and similar) tools. */
+/** Mutates known string args in place for GitHub / Jira tools. */
 export function sanitizeToolArgs(toolName: string, args: Record<string, unknown>): void {
   if (typeof args.path === 'string') {
     args.path = sanitizeRepoPath(args.path);
@@ -52,5 +52,19 @@ export function sanitizeToolArgs(toolName: string, args: Record<string, unknown>
   }
   if (typeof args.head === 'string') {
     args.head = args.head.trim().replace(/^[\s`"'{\\}]+|[\s`"'{\\}]+$/g, '');
+  }
+  if (toolName.startsWith('jira.')) {
+    if (args.issue_key == null && (args.key != null || args.issueKey != null || args.issue != null)) {
+      args.issue_key = args.key ?? args.issueKey ?? args.issue;
+    }
+    if (typeof args.issue_key === 'string') {
+      args.issue_key = args.issue_key.trim().replace(/^[\s`"'{\\}]+|[\s`"'{\\}]+$/g, '');
+    }
+    if (typeof args.jql === 'string') {
+      args.jql = args.jql.trim();
+    }
+    if (typeof args.project === 'string') {
+      args.project = args.project.trim().toUpperCase();
+    }
   }
 }

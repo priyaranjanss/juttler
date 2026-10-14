@@ -16,7 +16,24 @@ import { callTool, executeApprovedTool } from './pluginGateway';
 import { buildChiefSystemPrompt, isChiefOfStaffBot, RosterEntry, WorkspaceService } from '../config/chiefOfStaff';
 import { WORKSPACE_TOOLS, isWorkspaceTool, executeWorkspaceTool } from './workspaceTools';
 import { describeWorkDesk } from './workScope';
+import { extractIssueKeys } from './issueKeys';
 import { findSlackAppByBotId } from '../repositories/slackApps';
+
+/** Turn free-text ticket mentions into concrete tool instructions (no ticket hardcoding). */
+function ticketWorkHint(messageContent: string, history: Message[]): string {
+  const recentUser = history
+    .filter((m) => m.type === 'text' && m.senderType === 'user')
+    .slice(-6)
+    .map((m) => m.content);
+  const keys = extractIssueKeys(messageContent, ...recentUser);
+  if (keys.length === 0) return '';
+  return [
+    `Issue key(s) in this thread: ${keys.join(', ')}.`,
+    `Call jira.get_ticket with issue_key set to that key (do not pass the key as raw search text).`,
+    `Read the description, then implement the fix with GitHub tools (branch, write_file, create_pull_request).`,
+    `Do not ask whether to proceed — finish the work, then summarize with the PR URL or blocker.`,
+  ].join(' ');
+}
 
 export const DELEGATE_TOOL = 'delegate_to_bot';
 
@@ -320,7 +337,15 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     tools: toolSpecs,
     executor,
     overrideSystemPrompt: systemPrompt,
-    systemAddendum: [options.systemAddendum, describeWorkDesk(bot), accountLine, slackInstall].filter(Boolean).join('\n\n'),
+    systemAddendum: [
+      options.systemAddendum,
+      describeWorkDesk(bot),
+      accountLine,
+      slackInstall,
+      ticketWorkHint(messageContent, history),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
   });
 
   return {

@@ -70,21 +70,55 @@ export function assertWorkScope(bot: WorkDesk, pluginSlug: string, args: Record<
         `${bot.name} has no GitHub repository allowed. Turn on GitHub for this bot and choose repositories in its settings.`
       );
     }
-    const raw = typeof args.repo === 'string' ? args.repo.trim() : '';
-    if (!raw && bot.githubRepos.length === 1) {
+    // One desk repo → always use it. Models often omit or mangle `repo`.
+    if (bot.githubRepos.length === 1) {
       args.repo = bot.githubRepos[0];
       return;
     }
-    const repo = raw ? normalizeRepo(raw) : null;
-    const allowed = repo
-      ? bot.githubRepos.find((item) => item.toLowerCase() === repo.toLowerCase())
-      : undefined;
-    if (!allowed) {
+    const raw = typeof args.repo === 'string' ? args.repo.trim().replace(/^[\s`"'{\\}]+|[\s`"'{\\}]+$/g, '') : '';
+    if (!raw) {
       throw new Error(
-        `${bot.name} can only use these repositories: ${bot.githubRepos.join(', ')}. Pass repo as owner/name.`
+        `${bot.name} can use these repositories: ${bot.githubRepos.join(', ')}. Pass repo as owner/name.`
       );
     }
-    args.repo = allowed;
+    const exact = normalizeRepo(raw);
+    if (exact) {
+      const allowed = bot.githubRepos.find((item) => item.toLowerCase() === exact.toLowerCase());
+      if (allowed) {
+        args.repo = allowed;
+        return;
+      }
+    }
+    // Bare repo name ("juttler") when it uniquely matches a desk entry.
+    const bare = raw.replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+    const nameOnly = bare.includes('/') ? bare.split('/').pop()! : bare;
+    const byName = bot.githubRepos.filter(
+      (item) => item.split('/')[1]?.toLowerCase() === nameOnly.toLowerCase()
+    );
+    if (byName.length === 1) {
+      args.repo = byName[0];
+      return;
+    }
+    throw new Error(
+      `${bot.name} can only use these repositories: ${bot.githubRepos.join(', ')}. Pass repo as owner/name.`
+    );
+  }
+
+  if (pluginSlug === 'jira') {
+    // Normalize common model aliases before the executor runs.
+    if (args.issue_key == null && (args.key != null || args.issueKey != null || args.issue != null)) {
+      args.issue_key = args.key ?? args.issueKey ?? args.issue;
+    }
+    if (bot.jiraProject) {
+      args._preferredProject = bot.jiraProject;
+      if (
+        (args.project == null || String(args.project).trim() === '') &&
+        typeof args.summary === 'string'
+      ) {
+        // create_ticket without project → desk project.
+        args.project = bot.jiraProject;
+      }
+    }
   }
 }
 
@@ -94,15 +128,24 @@ export function describeWorkDesk(bot: WorkDesk): string {
     'You have no computer, no shell, and no local files.',
     'For any request these tools can do, call them and finish the work. Look up missing names yourself. Do not invent live data.',
   ];
-  if (bot.githubRepos.length > 0) {
+  if (bot.githubRepos.length === 1) {
+    lines.push(
+      `Your only GitHub repository is ${bot.githubRepos[0]}. Omit repo on GitHub tools (it is filled in). ` +
+        'Search, list the tree, read files, edit/write/delete files, create branches, and open pull requests. Do not merge unless the user approves it.'
+    );
+  } else if (bot.githubRepos.length > 1) {
     lines.push(
       `GitHub repositories you may fully work in: ${bot.githubRepos.join(', ')}. ` +
-        'Search, list the tree, read files, edit/write/delete files, create branches, and open pull requests with the GitHub tools. ' +
-        'Pass repo as owner/name, or omit it when only one is listed. Do not use any other repository. Do not merge unless the user approves it.'
+        'Pass repo as owner/name. Search, list the tree, read files, edit/write/delete files, create branches, and open pull requests. ' +
+        'Do not use any other repository. Do not merge unless the user approves it.'
     );
   }
   if (bot.jiraProject) {
-    lines.push(`Preferred Jira project key: ${bot.jiraProject}.`);
+    lines.push(
+      `Preferred Jira project key: ${bot.jiraProject}. ` +
+        'When the user names an issue key, call jira.get_ticket with that key. ' +
+        'For new tickets, use this project unless they name another.'
+    );
   }
   return lines.join('\n');
 }
