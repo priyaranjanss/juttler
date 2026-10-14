@@ -111,13 +111,33 @@ type ChatMessage = {
 // specialist, then answer. Five rounds runs out mid-flow and leaves the user
 // with an error instead of a reply, so keep this generous; rounds now stop early
 // on their own when a round gains nothing useful.
-const MAX_TOOL_ROUNDS = 10;
+// Ticket → branch → PR needs more steps than a single lookup.
+const MAX_TOOL_ROUNDS = 18;
 const MAX_GATEWAY_ATTEMPTS = 3;
 const MAX_CONTEXT_ITEM_CHARS = 8_000;
 
 function stringifyContext(value: unknown): string {
   if (typeof value === 'string') return value;
   return JSON.stringify(value ?? null) ?? String(value);
+}
+
+/** Compact digest for forced finals and empty-model fallbacks. */
+function summarizeToolEvents(events: ToolEvent[]): string {
+  if (events.length === 0) return 'No tools ran.';
+  return events
+    .map((event) => {
+      if (event.status === 'failed' || event.status === 'unavailable') {
+        return `- ${event.toolName}: failed — ${event.error || stringifyContext(event.result)}`;
+      }
+      if (event.status === 'needs_approval') {
+        return `- ${event.toolName}: waiting for approval`;
+      }
+      const result = event.result;
+      if (result == null) return `- ${event.toolName}: ok`;
+      const snippet = stringifyContext(result);
+      return `- ${event.toolName}: ok — ${snippet.length > 400 ? `${snippet.slice(0, 400)}…` : snippet}`;
+    })
+    .join('\n');
 }
 
 function buildToolCapabilityContext(tools: BotToolSpec[]): string {
@@ -495,14 +515,16 @@ export async function runBotTurn(params: {
     // it can no longer defer by calling another tool. This is what stops a turn
     // from dying as "stopped after N tool rounds".
     // ---------------------------------------------------------------------
+    const toolDigest = summarizeToolEvents(collected);
     const finalMessages: ChatMessage[] = [
       ...messages,
       {
         role: 'system',
         content:
           'You cannot call any more tools now. Using only what you already have, answer the user directly and completely. ' +
-          'If part of the request could not be completed, say exactly which part and what the user should do next (for example which plugin to connect or which tool to enable). ' +
-          'Do not ask to call a tool again, and do not repeat a question you already asked.',
+          'If part of the request could not be completed, say exactly which part and what failed. ' +
+          'Do not ask to call a tool again, and do not repeat a question you already asked.\n\n' +
+          `Tool outcomes this turn:\n${toolDigest}`,
       },
     ];
 
@@ -515,8 +537,8 @@ export async function runBotTurn(params: {
       body: JSON.stringify({
         model,
         messages: finalMessages,
-        max_tokens: 1024,
-        temperature: 0.7,
+        max_tokens: 2048,
+        temperature: 0.4,
       }),
     });
 
@@ -527,6 +549,15 @@ export async function runBotTurn(params: {
         detail = body?.error?.message ? ` - ${body.error.message}` : '';
       } catch {
         // no JSON body
+      }
+      // Prefer a digest over a hard failure so Slack still gets progress.
+      if (toolDigest && toolDigest !== 'No tools ran.') {
+        return {
+          text: `I hit a model error after running tools (${finalRes.status}${detail}). Here is what already ran:\n${toolDigest}`,
+          tools: collected,
+          tokenUsage: usage,
+          waitingForApproval: false,
+        };
       }
       return {
         tools: collected,
@@ -550,19 +581,23 @@ export async function runBotTurn(params: {
       return { text: finalText, tools: collected, tokenUsage: usage, waitingForApproval: false };
     }
 
-    // The model had its chance and produced nothing. Report the concrete reason
-    // instead of a generic "try again".
-    const attempted = collected.filter((e) => e.status !== 'needs_approval');
-    const detail = attempted.map((e) => `${e.toolName}: ${e.error ?? 'returned no output'}`).join('; ');
+    // Model returned empty — still tell the user what tools did so Slack is not blank.
+    if (toolDigest && toolDigest !== 'No tools ran.') {
+      return {
+        text: `I ran tools but could not draft a full summary. Progress:\n${toolDigest}`,
+        tools: collected,
+        tokenUsage: usage,
+        waitingForApproval: false,
+      };
+    }
+
     return {
       tools: collected,
       tokenUsage: usage,
       waitingForApproval: false,
       error: {
         kind: 'bad_response',
-        message: detail
-          ? `No answer was produced. Tool results: ${detail}`
-          : 'No answer was produced. Try rephrasing the request.',
+        message: 'No answer was produced. Try rephrasing the request.',
       },
     };
   } catch (err) {

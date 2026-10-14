@@ -23,13 +23,16 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'search_tickets',
-        description: 'Search Jira issues. total is the full number of matches. issues are the rows. Omit jql to search everything this account can see.',
+        description: 'Search Jira issues with JQL. Omit jql to search recent issues. Queries need at least one filter.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            jql: { type: 'string', description: 'Optional JQL. Leave empty to search every issue this account can see.' },
-            max_results: { type: 'number', description: 'How many matching issues to include. total is still the full count.' },
+            jql: {
+              type: 'string',
+              description: 'JQL with at least one filter (project, key, status, updated, …). Empty searches recent issues.',
+            },
+            max_results: { type: 'number', description: 'How many matching issues to include.' },
           },
           required: [],
         },
@@ -64,21 +67,34 @@ export const jiraPlugin: PluginModule = {
         },
       },
       {
-        name: 'change_status',
-        description: 'Transition an issue to a different status.',
+        name: 'list_transitions',
+        description: 'List status transitions available on an issue right now.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
             issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
-            transition: { type: 'string', description: 'Target transition name, e.g. "Done"' },
+          },
+          required: ['issue_key'],
+        },
+      },
+      {
+        name: 'change_status',
+        description:
+          'Move an issue through its workflow. transition may be the transition name or the target status. Use list_transitions if unsure.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            issue_key: { type: 'string', description: 'Issue key, e.g. "ABC-123"' },
+            transition: { type: 'string', description: 'Transition name or target status name' },
           },
           required: ['issue_key', 'transition'],
         },
       },
       {
         name: 'get_ticket',
-        description: 'Read one issue, including its description and latest comments.',
+        description: 'Read one issue by key, including description and comments.',
         sensitive: false,
         parameters: {
           type: 'object',

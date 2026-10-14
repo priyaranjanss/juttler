@@ -36,6 +36,12 @@ describe('work desk', () => {
     );
   });
 
+  it('fills in repo when the bot has exactly one allowed repository', () => {
+    const args: Record<string, any> = {};
+    assertWorkScope(desk, 'github', args);
+    assert.equal(args.repo, 'acme/app');
+  });
+
   it('does not limit Slack or Jira', () => {
     const slack = { channel: 'C123' };
     assertWorkScope(desk, 'slack', slack);

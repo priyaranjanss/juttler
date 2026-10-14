@@ -61,6 +61,7 @@ export function normalizeProject(value: unknown): string | null {
 /**
  * Rejects a GitHub call for a repository this bot is not allowed to use.
  * On success, `repo` is rewritten to the saved owner/name.
+ * If the model omits repo and only one is allowed, that one is used.
  */
 export function assertWorkScope(bot: WorkDesk, pluginSlug: string, args: Record<string, any>): void {
   if (pluginSlug === 'github') {
@@ -69,14 +70,18 @@ export function assertWorkScope(bot: WorkDesk, pluginSlug: string, args: Record<
         `${bot.name} has no GitHub repository allowed. Turn on GitHub for this bot and choose repositories in its settings.`
       );
     }
-    const raw = typeof args.repo === 'string' ? args.repo : '';
+    const raw = typeof args.repo === 'string' ? args.repo.trim() : '';
+    if (!raw && bot.githubRepos.length === 1) {
+      args.repo = bot.githubRepos[0];
+      return;
+    }
     const repo = raw ? normalizeRepo(raw) : null;
     const allowed = repo
       ? bot.githubRepos.find((item) => item.toLowerCase() === repo.toLowerCase())
       : undefined;
     if (!allowed) {
       throw new Error(
-        `${bot.name} can only use these repositories: ${bot.githubRepos.join(', ')}.`
+        `${bot.name} can only use these repositories: ${bot.githubRepos.join(', ')}. Pass repo as owner/name.`
       );
     }
     args.repo = allowed;
@@ -91,8 +96,11 @@ export function describeWorkDesk(bot: WorkDesk): string {
   ];
   if (bot.githubRepos.length > 0) {
     lines.push(
-      `GitHub repositories you may read and change: ${bot.githubRepos.join(', ')}. Create a branch, write files on that branch, and open a pull request. Do not use any other repository. Do not merge unless the user approves it.`
+      `GitHub repositories you may read and change: ${bot.githubRepos.join(', ')}. Pass repo as owner/name, or omit it when only one is listed. Do not use any other repository. Do not merge unless the user approves it.`
     );
+  }
+  if (bot.jiraProject) {
+    lines.push(`Preferred Jira project key: ${bot.jiraProject}.`);
   }
   return lines.join('\n');
 }

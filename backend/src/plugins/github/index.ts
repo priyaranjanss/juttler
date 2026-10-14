@@ -20,10 +20,13 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form, e.g. "octocat/Hello-World"' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             state: { type: 'string', description: 'Pull request state', enum: ['open', 'closed', 'all'] },
           },
-          required: ['repo'],
+          required: [],
         },
       },
       {
@@ -33,11 +36,14 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             path: { type: 'string', description: 'File path in the repo, e.g. "README.md"' },
             ref: { type: 'string', description: 'Branch, tag, or commit SHA (defaults to the default branch)' },
           },
-          required: ['repo', 'path'],
+          required: ['path'],
         },
       },
       {
@@ -47,10 +53,13 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             sha: { type: 'string', description: 'Branch name or SHA (defaults to the default branch)' },
           },
-          required: ['repo'],
+          required: [],
         },
       },
       {
@@ -60,12 +69,15 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             title: { type: 'string', description: 'Issue title' },
             body: { type: 'string', description: 'Issue body (Markdown supported)' },
             labels: { type: 'string', description: 'Comma-separated labels, e.g. "bug,priority"' },
           },
-          required: ['repo', 'title'],
+          required: ['title'],
         },
       },
       {
@@ -75,11 +87,14 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             pr_number: { type: 'number', description: 'Pull request number' },
             comment: { type: 'string', description: 'Comment body' },
           },
-          required: ['repo', 'pr_number', 'comment'],
+          required: ['pr_number', 'comment'],
         },
       },
       {
@@ -89,11 +104,14 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             branch_name: { type: 'string', description: 'Name of the new branch' },
             from: { type: 'string', description: 'Base branch or SHA (defaults to the default branch)' },
           },
-          required: ['repo', 'branch_name'],
+          required: ['branch_name'],
         },
       },
       {
@@ -103,11 +121,14 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             path: { type: 'string', description: 'Folder path. Omit for the repository root.' },
             ref: { type: 'string', description: 'Branch, tag, or commit SHA' },
           },
-          required: ['repo'],
+          required: [],
         },
       },
       {
@@ -117,13 +138,16 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             path: { type: 'string', description: 'File path in the repository' },
             content: { type: 'string', description: 'Full new contents of the file' },
             branch: { type: 'string', description: 'Branch to write on. Must already exist.' },
             message: { type: 'string', description: 'Commit message' },
           },
-          required: ['repo', 'path', 'content', 'branch', 'message'],
+          required: ['path', 'content', 'branch', 'message'],
         },
       },
       {
@@ -133,13 +157,16 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             title: { type: 'string', description: 'Pull request title' },
             head: { type: 'string', description: 'Branch that contains the changes' },
             base: { type: 'string', description: 'Branch to merge into. Defaults to the repository default branch.' },
             body: { type: 'string', description: 'Pull request description' },
           },
-          required: ['repo', 'title', 'head'],
+          required: ['title', 'head'],
         },
       },
       {
@@ -149,11 +176,14 @@ export const githubPlugin: PluginModule = {
         parameters: {
           type: 'object',
           properties: {
-            repo: { type: 'string', description: 'Repository in owner/name form' },
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
             pr_number: { type: 'number', description: 'Pull request number' },
             commit_title: { type: 'string', description: 'Title for the merge commit' },
           },
-          required: ['repo', 'pr_number'],
+          required: ['pr_number'],
         },
       },
     ],

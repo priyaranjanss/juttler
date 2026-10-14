@@ -20,6 +20,11 @@ function jiraBase(ctx: { credential: Record<string, any> }): string {
   return `https://${host}`;
 }
 
+/** Issue keys are uppercase (ICS-9). Lowercase ics-9 often 404s. */
+function issueKey(value: string): string {
+  return value.trim().toUpperCase();
+}
+
 /** Flattens Atlassian document JSON into plain text for the model. */
 function adfToText(node: any): string {
   if (!node) return '';
@@ -35,7 +40,7 @@ function jiraHeaders(ctx: { credential: Record<string, any> }): Record<string, s
     throw new Error('Jira needs an email and an API token. Reconnect Jira from Plugins.');
   }
   const basic = Buffer.from(`${ctx.credential.email}:${ctx.credential.apiToken}`).toString('base64');
-  return { Authorization: `Basic ${basic}` };
+  return { Authorization: `Basic ${basic}`, Accept: 'application/json' };
 }
 
 /** Jira's v3 description format (Atlassian Document Format). */
@@ -50,6 +55,18 @@ function plainTextDoc(text: string) {
 async function jiraAccount(base: string, headers: Record<string, string>): Promise<{ name: string; email: string }> {
   const me = await requestJson(`${base}/rest/api/3/myself`, { headers });
   return { name: me.displayName || me.name || '', email: me.emailAddress || '' };
+}
+
+/**
+ * Enhanced search rejects unbounded JQL with 400.
+ * Always include at least one real filter clause.
+ */
+function boundedJql(raw: unknown): string {
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  if (!trimmed) return 'updated >= -120d ORDER BY updated DESC';
+  // Bare ORDER BY / empty filters are unbounded.
+  if (/^order\s+by\b/i.test(trimmed)) return `updated >= -120d ${trimmed}`;
+  return trimmed;
 }
 
 export const jiraTools: Record<string, ToolExecutor> = {
@@ -70,29 +87,31 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   search_tickets: async (args, ctx) => {
-    const jql = typeof args.jql === 'string' && args.jql.trim()
-      ? args.jql.trim()
-      : 'created >= "1970-01-01" ORDER BY updated DESC';
+    const jql = boundedJql(args.jql);
     const limit = optionalNumber(args, 'max_results', 20, 100);
     const base = jiraBase(ctx);
     const headers = jiraHeaders(ctx);
-    const [found, counted, account] = await Promise.all([
-      requestJson(`${base}/rest/api/3/search/jql`, {
-        method: 'POST',
-        headers,
-        body: {
-          jql,
-          maxResults: limit,
-          fields: ['summary', 'status', 'assignee', 'priority', 'issuetype', 'project'],
-        },
-      }),
-      requestJson(`${base}/rest/api/3/search/approximate-count`, {
+    const found = await requestJson(`${base}/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers,
+      body: {
+        jql,
+        maxResults: limit,
+        fields: ['summary', 'status', 'assignee', 'priority', 'issuetype', 'project', 'updated'],
+      },
+    });
+    let total: number | undefined;
+    try {
+      const counted = await requestJson(`${base}/rest/api/3/search/approximate-count`, {
         method: 'POST',
         headers,
         body: { jql },
-      }),
-      jiraAccount(base, headers),
-    ]);
+      });
+      if (typeof counted?.count === 'number') total = counted.count;
+    } catch {
+      // Count is optional; search results are enough to continue the ticket work.
+    }
+    const account = await jiraAccount(base, headers);
     const issues = (found.issues ?? []).map((issue: any) => ({
       key: issue.key,
       summary: issue.fields?.summary,
@@ -102,9 +121,8 @@ export const jiraTools: Record<string, ToolExecutor> = {
       project: issue.fields?.project?.key,
       url: `${base}/browse/${issue.key}`,
     }));
-    const total = typeof counted?.count === 'number' ? counted.count : issues.length;
     return {
-      total,
+      total: total ?? issues.length,
       returned: issues.length,
       jql,
       account,
@@ -119,7 +137,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
       headers: jiraHeaders(ctx),
       body: {
         fields: {
-          project: { key: requiredString(args, 'project') },
+          project: { key: requiredString(args, 'project').toUpperCase() },
           summary: requiredString(args, 'summary'),
           issuetype: { name: args.issue_type ? String(args.issue_type) : 'Task' },
           ...(args.description ? { description: plainTextDoc(String(args.description)) } : {}),
@@ -130,14 +148,14 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   update_ticket: async (args, ctx) => {
-    const key = requiredString(args, 'issue_key');
+    const key = issueKey(requiredString(args, 'issue_key'));
     const fields: Record<string, any> = {};
     if (args.summary) fields.summary = String(args.summary);
     if (args.description) fields.description = plainTextDoc(String(args.description));
     if (Object.keys(fields).length === 0) {
       throw new Error('Nothing to update - provide summary or description.');
     }
-    await requestJson(`${jiraBase(ctx)}/rest/api/3/issue/${key}`, {
+    await requestJson(`${jiraBase(ctx)}/rest/api/3/issue/${encodeURIComponent(key)}`, {
       method: 'PUT',
       headers: jiraHeaders(ctx),
       body: { fields },
@@ -145,38 +163,68 @@ export const jiraTools: Record<string, ToolExecutor> = {
     return { updated: true, key };
   },
 
+  list_transitions: async (args, ctx) => {
+    const key = issueKey(requiredString(args, 'issue_key'));
+    const base = jiraBase(ctx);
+    const data = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
+      headers: jiraHeaders(ctx),
+    });
+    const transitions = (data.transitions ?? []).map((t: any) => ({
+      id: t.id,
+      name: t.name,
+      to: t.to?.name ?? null,
+    }));
+    return { key, transitions };
+  },
+
   change_status: async (args, ctx) => {
-    const key = requiredString(args, 'issue_key');
-    const transitionName = requiredString(args, 'transition');
+    const key = issueKey(requiredString(args, 'issue_key'));
+    const wanted = requiredString(args, 'transition').trim().toLowerCase();
     const base = jiraBase(ctx);
     const headers = jiraHeaders(ctx);
 
-    // Jira transitions are per-workflow, so look the name up to get its id.
-    const transitions = await requestJson(`${base}/rest/api/3/issue/${key}/transitions`, { headers });
-    const match = (transitions.transitions ?? []).find(
-      (t: any) => t.name.toLowerCase() === transitionName.toLowerCase()
-    );
+    const transitions = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
+      headers,
+    });
+    const list = transitions.transitions ?? [];
+    const match =
+      list.find((t: any) => String(t.name || '').toLowerCase() === wanted) ||
+      list.find((t: any) => String(t.to?.name || '').toLowerCase() === wanted) ||
+      list.find(
+        (t: any) =>
+          String(t.name || '').toLowerCase().includes(wanted) ||
+          String(t.to?.name || '').toLowerCase().includes(wanted)
+      );
     if (!match) {
-      const available = (transitions.transitions ?? []).map((t: any) => t.name).join(', ');
-      throw new Error(`Transition "${transitionName}" not available. Available: ${available || 'none'}`);
+      const available = list
+        .map((t: any) => `${t.name}${t.to?.name ? ` → ${t.to.name}` : ''}`)
+        .join(', ');
+      throw new Error(
+        `Transition "${args.transition}" is not available on ${key}. Available: ${available || 'none'}. Call jira.list_transitions first.`
+      );
     }
 
-    await requestJson(`${base}/rest/api/3/issue/${key}/transitions`, {
+    await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
       method: 'POST',
       headers,
       body: { transition: { id: match.id } },
     });
-    return { transitioned: true, key, to: transitionName };
+    return {
+      transitioned: true,
+      key,
+      transition: match.name,
+      to: match.to?.name ?? null,
+    };
   },
 
   get_ticket: async (args, ctx) => {
-    const key = requiredString(args, 'issue_key');
+    const key = issueKey(requiredString(args, 'issue_key'));
     const base = jiraBase(ctx);
     const data = await requestJson(
-      `${base}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,priority,description,comment`,
+      `${base}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,priority,description,comment,issuetype,project`,
       { headers: jiraHeaders(ctx) }
     );
-    const comments = (data.fields?.comment?.comments ?? []).slice(-5).map((comment: any) => ({
+    const comments = (data.fields?.comment?.comments ?? []).slice(-8).map((comment: any) => ({
       author: comment.author?.displayName,
       body: adfToText(comment.body).trim(),
       created: comment.created,
@@ -185,6 +233,8 @@ export const jiraTools: Record<string, ToolExecutor> = {
       key: data.key,
       summary: data.fields?.summary,
       status: data.fields?.status?.name,
+      issue_type: data.fields?.issuetype?.name,
+      project: data.fields?.project?.key,
       assignee: data.fields?.assignee?.displayName ?? null,
       priority: data.fields?.priority?.name,
       description: adfToText(data.fields?.description).trim(),
@@ -194,7 +244,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   add_comment: async (args, ctx) => {
-    const key = requiredString(args, 'issue_key');
+    const key = issueKey(requiredString(args, 'issue_key'));
     const base = jiraBase(ctx);
     const data = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
       method: 'POST',
@@ -205,7 +255,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   },
 
   assign_ticket: async (args, ctx) => {
-    const key = requiredString(args, 'issue_key');
+    const key = issueKey(requiredString(args, 'issue_key'));
     const who = requiredString(args, 'assignee');
     const base = jiraBase(ctx);
     const headers = jiraHeaders(ctx);
