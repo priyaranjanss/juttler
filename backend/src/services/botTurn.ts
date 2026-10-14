@@ -16,23 +16,35 @@ import { callTool, executeApprovedTool } from './pluginGateway';
 import { buildChiefSystemPrompt, isChiefOfStaffBot, RosterEntry, WorkspaceService } from '../config/chiefOfStaff';
 import { WORKSPACE_TOOLS, isWorkspaceTool, executeWorkspaceTool } from './workspaceTools';
 import { describeWorkDesk } from './workScope';
-import { extractIssueKeys } from './issueKeys';
+import { resolveThreadIssueKeys } from './issueKeys';
 import { findSlackAppByBotId } from '../repositories/slackApps';
 
 /** Turn free-text ticket mentions into concrete tool instructions (no ticket hardcoding). */
-function ticketWorkHint(messageContent: string, history: Message[]): string {
+function ticketWorkHint(
+  messageContent: string,
+  history: Message[],
+  preferredProject: string | null
+): { hint: string; keys: string[] } {
   const recentUser = history
     .filter((m) => m.type === 'text' && m.senderType === 'user')
-    .slice(-6)
+    .slice(-8)
     .map((m) => m.content);
-  const keys = extractIssueKeys(messageContent, ...recentUser);
-  if (keys.length === 0) return '';
-  return [
-    `Issue key(s) in this thread: ${keys.join(', ')}.`,
-    `Call jira.get_ticket with issue_key set to that key (do not pass the key as raw search text).`,
-    `Read the description, then implement the fix with GitHub tools (branch, write_file, create_pull_request).`,
-    `Do not ask whether to proceed — finish the work, then summarize with the PR URL or blocker.`,
-  ].join(' ');
+  const keys = resolveThreadIssueKeys({
+    preferredProject,
+    message: messageContent,
+    historyTexts: recentUser,
+  });
+  if (keys.length === 0) return { hint: '', keys: [] };
+  return {
+    keys,
+    hint: [
+      `Issue key(s) in this thread: ${keys.join(', ')}.`,
+      `Call jira.get_ticket with issue_key=${keys[0]} (aliases key/issue/ticket are fine; bare numbers use the preferred project).`,
+      `Short follow-ups like "continue", "do it", or just "9" still refer to that key — resolve from this thread, do not ask again.`,
+      `Read the description, then implement with GitHub tools (search_code → get_file → edit_file → create_pull_request).`,
+      `Do not ask whether to proceed — finish the work, then summarize with the PR URL or blocker.`,
+    ].join(' '),
+  };
 }
 
 export const DELEGATE_TOOL = 'delegate_to_bot';
@@ -329,6 +341,7 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     ? `This bot is installed in Slack as itself (@${bot.name}).`
     : '';
 
+  const ticket = ticketWorkHint(messageContent, history, bot.jiraProject);
   const turn = await runBotTurn({
     bot,
     userName,
@@ -337,12 +350,13 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     tools: toolSpecs,
     executor,
     overrideSystemPrompt: systemPrompt,
+    contextIssueKeys: ticket.keys,
     systemAddendum: [
       options.systemAddendum,
       describeWorkDesk(bot),
       accountLine,
       slackInstall,
-      ticketWorkHint(messageContent, history),
+      ticket.hint,
     ]
       .filter(Boolean)
       .join('\n\n'),

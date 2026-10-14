@@ -143,8 +143,15 @@ export function describeWorkDesk(bot: WorkDesk): string {
   if (bot.jiraProject) {
     lines.push(
       `Preferred Jira project key: ${bot.jiraProject}. ` +
-        'When the user names an issue key, call jira.get_ticket with that key. ' +
-        'For new tickets, use this project unless they name another.'
+        `A bare number like "9" means ${bot.jiraProject}-9. ` +
+        'When the user names an issue key (or continues work on one from the thread), call jira.get_ticket with that key. ' +
+        'For new tickets, use this project unless they name another. ' +
+        'You can search, create, update, comment, assign, and change status on any issue this account can access.'
+    );
+  } else {
+    lines.push(
+      'Jira: use list_projects / search_tickets when you need to discover keys; get_ticket when a key is known. ' +
+        'You can create, update, comment, assign, and change status.'
     );
   }
   return lines.join('\n');

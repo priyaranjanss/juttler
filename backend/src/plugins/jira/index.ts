@@ -1,30 +1,41 @@
-import { jiraTools } from './executor';
+/**
+ * Jira plugin — ticket agent over the connected Atlassian site.
+ */
+
 import { PluginModule } from '../types';
+import { jiraTools } from './tools';
+
+const issueKeyParam = {
+  type: 'string' as const,
+  description:
+    'Issue key (ABC-123). Aliases: key / issue / ticket. A bare number is OK when the bot has a preferred project.',
+};
 
 export const jiraPlugin: PluginModule = {
   definition: {
     slug: 'jira',
     name: 'Jira',
-    description: 'Do the ticket work in one Jira project: search, read, create, update, comment, assign, and change status.',
+    description:
+      'Do ticket work end-to-end: search, read, create, update, comment, assign, and change status.',
     category: 'Project management',
     isOfficial: true,
     authType: 'token',
     requiredCredentials: [
-      { key: 'site', label: 'Jira site', secret: false, placeholder: 'your-site (the part before .atlassian.net)' },
+      { key: 'site', label: 'Jira site', secret: false, placeholder: 'your-site (before .atlassian.net)' },
       { key: 'email', label: 'Account email', secret: false, placeholder: 'you@company.com' },
       { key: 'apiToken', label: 'API token', secret: true, placeholder: 'Atlassian API token' },
     ],
     tools: [
       {
         name: 'list_projects',
-        description: 'List the Jira projects this account can see.',
+        description: 'List Jira projects this account can see.',
         sensitive: false,
         parameters: { type: 'object', properties: {}, required: [] },
       },
       {
         name: 'search_tickets',
         description:
-          'Search issues with JQL when you do not already know the issue key. If the user named a key like ABC-123, use get_ticket instead.',
+          'Search with JQL when you do not already know the issue key. If the user named a key, use get_ticket instead.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -32,42 +43,50 @@ export const jiraPlugin: PluginModule = {
             jql: {
               type: 'string',
               description:
-                'Valid JQL (e.g. key = ABC-123, project = ABC AND status = "To Do"). A bare issue key is OK and will be rewritten. Empty searches recent issues.',
+                'JQL, a bare issue key, or empty for recent issues in the preferred project.',
             },
-            max_results: { type: 'number', description: 'How many matching issues to include.' },
+            max_results: { type: 'number', description: 'How many issues to return' },
           },
           required: [],
         },
       },
       {
+        name: 'get_ticket',
+        description:
+          'Read one issue by key (summary, description, comments). Prefer this whenever a key is known — including short follow-ups that refer to a ticket in the thread.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: { issue_key: issueKeyParam },
+          required: ['issue_key'],
+        },
+      },
+      {
         name: 'create_ticket',
-        description: 'Create a new issue in a project.',
+        description: 'Create an issue. Project defaults to the bot preferred project when omitted.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
             project: {
               type: 'string',
-              description: 'Project key, e.g. "ABC". Omit when this bot has a preferred Jira project.',
+              description: 'Project key. Omit when the bot has a preferred Jira project.',
             },
             summary: { type: 'string', description: 'Issue summary' },
-            issue_type: { type: 'string', description: 'Issue type, e.g. "Task" or "Bug"' },
-            description: { type: 'string', description: 'Issue description' },
+            issue_type: { type: 'string', description: 'Task, Bug, Story, …' },
+            description: { type: 'string', description: 'Description' },
           },
           required: ['summary'],
         },
       },
       {
         name: 'update_ticket',
-        description: 'Update fields on an existing issue.',
+        description: 'Update summary and/or description on an issue.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            issue_key: {
-              type: 'string',
-              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
-            },
+            issue_key: issueKeyParam,
             summary: { type: 'string', description: 'New summary' },
             description: { type: 'string', description: 'New description' },
           },
@@ -80,59 +99,31 @@ export const jiraPlugin: PluginModule = {
         sensitive: false,
         parameters: {
           type: 'object',
-          properties: {
-            issue_key: {
-              type: 'string',
-              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
-            },
-          },
+          properties: { issue_key: issueKeyParam },
           required: ['issue_key'],
         },
       },
       {
         name: 'change_status',
-        description:
-          'Move an issue through its workflow. transition may be the transition name or the target status. Use list_transitions if unsure.',
+        description: 'Move an issue through its workflow by transition or target status name.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            issue_key: {
-              type: 'string',
-              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
-            },
-            transition: { type: 'string', description: 'Transition name or target status name' },
+            issue_key: issueKeyParam,
+            transition: { type: 'string', description: 'Transition or target status name' },
           },
           required: ['issue_key', 'transition'],
         },
       },
       {
-        name: 'get_ticket',
-        description:
-          'Read one issue by key (summary, description, comments). Prefer this whenever the user names a key like ABC-123 — do not search first.',
-        sensitive: false,
-        parameters: {
-          type: 'object',
-          properties: {
-            issue_key: {
-              type: 'string',
-              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
-            },
-          },
-          required: ['issue_key'],
-        },
-      },
-      {
         name: 'add_comment',
-        description: 'Add a comment to an issue. Use this to record a pull request link.',
+        description: 'Comment on an issue (e.g. drop a PR link).',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            issue_key: {
-              type: 'string',
-              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
-            },
+            issue_key: issueKeyParam,
             comment: { type: 'string', description: 'Comment text' },
           },
           required: ['issue_key', 'comment'],
@@ -140,16 +131,13 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'assign_ticket',
-        description: 'Assign an issue to a person by name, email, or account id.',
+        description: 'Assign an issue by display name, email, or account id.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            issue_key: {
-              type: 'string',
-              description: 'Issue key, e.g. "ABC-123" (aliases key / issue also accepted)',
-            },
-            assignee: { type: 'string', description: 'Display name, email, or Atlassian account id' },
+            issue_key: issueKeyParam,
+            assignee: { type: 'string', description: 'Name, email, or account id' },
           },
           required: ['issue_key', 'assignee'],
         },

@@ -8,6 +8,7 @@ import {
   sanitizeBranchName,
   sanitizeRepoPath,
 } from '../plugins/github/paths';
+import { resolveIssueKey, stripKeyJunk } from '../plugins/jira/keys';
 
 export { isPlausibleRepoPath, sanitizeRepoPath, resolvePathArg } from '../plugins/github/paths';
 
@@ -44,13 +45,18 @@ export function sanitizeToolArgs(toolName: string, args: Record<string, unknown>
   }
 
   if (toolName.startsWith('jira.')) {
-    if (args.issue_key == null && (args.key != null || args.issueKey != null || args.issue != null)) {
-      args.issue_key = args.key ?? args.issueKey ?? args.issue;
+    if (
+      args.issue_key == null &&
+      (args.key != null || args.issueKey != null || args.issue != null || args.ticket != null)
+    ) {
+      args.issue_key = args.key ?? args.issueKey ?? args.issue ?? args.ticket;
     }
     if (typeof args.issue_key === 'string') {
-      args.issue_key = args.issue_key.trim().replace(/^[\s`"'{\\}]+|[\s`"'{\\}]+$/g, '');
+      const cleaned = stripKeyJunk(args.issue_key);
+      const resolved = resolveIssueKey(cleaned);
+      args.issue_key = resolved || cleaned;
     }
-    if (typeof args.jql === 'string') args.jql = args.jql.trim();
+    if (typeof args.jql === 'string') args.jql = stripKeyJunk(args.jql);
     if (typeof args.project === 'string') args.project = args.project.trim().toUpperCase();
   }
 }

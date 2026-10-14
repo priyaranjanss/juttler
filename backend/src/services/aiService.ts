@@ -6,6 +6,7 @@ import {
   stripEmbeddedToolMarkup,
 } from './embeddedToolCalls';
 import { isPlausibleRepoPath, resolvePathArg, sanitizeToolArgs } from './toolArgSanitize';
+import { resolveIssueKey } from '../plugins/jira/keys';
 
 // Every bot must have its own explicit model and key. Never fall back to a
 // workspace credential: that would make bots share both identity and billing.
@@ -479,6 +480,8 @@ function userAskedForChanges(message: string, history: Message[] = []): boolean 
     return false;
   }
   if (SHORT_FOLLOW_UP.test(text)) return true;
+  // Bare ticket number ("9" / "#9" / "ticket 9") is work, not a question.
+  if (/^(?:ticket|issue|bug|#)?\s*#?\d{1,5}$/i.test(text)) return true;
   if (/\b[A-Za-z][A-Za-z0-9]+-\d+\b/.test(text) && !PURE_QUESTION.test(text)) return true;
   if (PURE_QUESTION.test(text) && !CHANGE_VERBS.test(text)) return false;
   if (CHANGE_VERBS.test(text)) return true;
@@ -502,7 +505,7 @@ function needsActionAfterReads(events: ToolEvent[], message: string, history: Me
 
 /** Model wrote a plan / asked permission instead of calling write tools. */
 function isAskingPermissionToAct(text: string): boolean {
-  return /\b(if you('d| would)? like|shall i|should i|want me to|let me know if|happy to (implement|proceed|fix)|i can (implement|fix|proceed|make)|would you like me to|can implement those|i can implement)\b/i.test(
+  return /\b(if you('d| would)? like|shall i|should i|want me to|let me know if|happy to (implement|proceed|fix)|i can (implement|fix|proceed|make)|would you like me to|can implement those|i can implement|say continue|stopped before (applying|writing)|no write\/?pr yet)\b/i.test(
     text
   );
 }
@@ -553,6 +556,43 @@ function fillMissingGithubPath(toolName: string, args: Record<string, any>, even
   const known = recentKnownPaths(events);
   if (known.length === 1) {
     args.path = known[0];
+  }
+}
+
+const JIRA_KEY_TOOLS = new Set([
+  'jira.get_ticket',
+  'jira.update_ticket',
+  'jira.list_transitions',
+  'jira.change_status',
+  'jira.add_comment',
+  'jira.assign_ticket',
+]);
+
+/**
+ * When the model passes an empty/junk issue_key (or omits it), fill from the
+ * thread context so "continue" / "ICS-9" / "9" still hit the right ticket.
+ */
+function fillMissingIssueKey(
+  toolName: string,
+  args: Record<string, any>,
+  contextKeys: string[],
+  preferredProject: string | null | undefined
+): void {
+  if (!toolName.startsWith('jira.')) return;
+  if (preferredProject) args._preferredProject = preferredProject;
+
+  const primary = contextKeys[0] ?? null;
+  if (primary) args._contextIssueKey = primary;
+
+  if (!JIRA_KEY_TOOLS.has(toolName) && toolName !== 'jira.search_tickets') return;
+
+  const resolved = resolveIssueKey(args.issue_key ?? args.key ?? args.issue ?? args.ticket, preferredProject);
+  if (resolved) {
+    args.issue_key = resolved;
+    return;
+  }
+  if (primary && JIRA_KEY_TOOLS.has(toolName)) {
+    args.issue_key = primary;
   }
 }
 
@@ -619,8 +659,11 @@ export async function runBotTurn(params: {
   overrideSystemPrompt?: string;
   /** Extra instructions appended for a specific channel, such as a Slack reply. */
   systemAddendum?: string;
+  /** Issue keys resolved from this message + thread (ICS-9, bare "9", continue). */
+  contextIssueKeys?: string[];
 }): Promise<TurnResult> {
   const { bot, tools, executor } = params;
+  const contextIssueKeys = params.contextIssueKeys ?? [];
 
   // Every bot reasons with its own LLM configuration. Tool credentials remain
   // independent in the Tool Gateway, but a turn needs a model to request tools.
@@ -837,17 +880,23 @@ export async function runBotTurn(params: {
 
         // Change requests: never accept a chat reply until a write/PR/Jira mutation lands,
         // or we are out of rounds (then the forced final answer reports finish vs blocker).
+        // Thread ticket keys ("continue" / "ICS-9" / "9") count even before any tool ran.
         const unfinishedChange =
-          wantsChanges && !turnHasAction(collected) && (needsMoreWork || collected.length > 0);
+          wantsChanges &&
+          !turnHasAction(collected) &&
+          (needsMoreWork || collected.length > 0 || contextIssueKeys.length > 0);
         if (canContinue && unfinishedChange) {
           actionNudges += 1;
+          const ticketHint = contextIssueKeys[0]
+            ? ` If you still need the ticket, call jira.get_ticket with issue_key=${contextIssueKeys[0]}.`
+            : '';
           messages.push({ role: 'assistant', content: text });
           messages.push({
             role: 'system',
             content: isAskingPermissionToAct(text)
-              ? 'Do not ask for permission. Call edit_file (or write_file), then create_pull_request now.'
-              : 'That reply is premature. Finish with tools first: get_file → edit_file/write_file → create_pull_request. ' +
-                'Only then summarize. Never post Progress lists.',
+              ? `Do not ask for permission. Call edit_file (or write_file), then create_pull_request now.${ticketHint}`
+              : 'That reply is premature. Finish with tools first: get_ticket (if needed) → get_file → edit_file/write_file → create_pull_request. ' +
+                `Only then summarize. Never post Progress lists.${ticketHint}`,
           });
           forceToolsNext = true;
           if (actionNudges >= 8) {
@@ -884,6 +933,7 @@ export async function runBotTurn(params: {
           args = parsed as Record<string, any>;
           sanitizeToolArgs(call.function.name, args);
           fillMissingGithubPath(call.function.name, args, collected);
+          fillMissingIssueKey(call.function.name, args, contextIssueKeys, bot.jiraProject);
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'Invalid JSON arguments.';
           const detail = `The model returned invalid arguments for ${call.function.name}: ${reason}`;

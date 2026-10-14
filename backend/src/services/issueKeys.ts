@@ -1,22 +1,29 @@
 /**
- * Pull Jira-style issue keys from free text (ICS-9, ABC-123, …).
- * Used to route the bot to get_ticket instead of broken free-text JQL.
+ * Thread-aware Jira issue keys for the bot turn.
+ * Full keys (ICS-9), bare numbers with desk project (9 → ICS-9), and history.
  */
 
-const KEY_RE = /\b([A-Za-z][A-Za-z0-9]+-\d+)\b/g;
+import { extractIssueKeys as extractFromChunks } from '../plugins/jira/keys';
 
+export { resolveIssueKey, stripKeyJunk, pickIssueKeyArg } from '../plugins/jira/keys';
+
+/** Keys mentioned in the current message (and optional extra chunks). */
 export function extractIssueKeys(...chunks: Array<string | null | undefined>): string[] {
-  const found: string[] = [];
-  const seen = new Set<string>();
-  for (const chunk of chunks) {
-    if (!chunk) continue;
-    KEY_RE.lastIndex = 0;
-    for (const match of chunk.matchAll(KEY_RE)) {
-      const key = match[1].toUpperCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      found.push(key);
-    }
-  }
-  return found;
+  return extractFromChunks(null, ...chunks);
+}
+
+/**
+ * Resolve issue keys for this turn from the message + recent user messages,
+ * using the bot's preferred Jira project for bare numbers like "9".
+ */
+export function resolveThreadIssueKeys(options: {
+  preferredProject?: string | null;
+  message: string;
+  historyTexts?: Array<string | null | undefined>;
+}): string[] {
+  return extractFromChunks(
+    options.preferredProject,
+    options.message,
+    ...(options.historyTexts ?? [])
+  );
 }
