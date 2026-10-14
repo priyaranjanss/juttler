@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  isPlausibleRepoPath,
   sanitizeFileContent,
   sanitizeRepoPath,
   sanitizeToolArgs,
@@ -16,6 +17,14 @@ describe('sanitizeRepoPath', () => {
   it('cleans quotes and backticks', () => {
     assert.equal(sanitizeRepoPath('"backend/src/a.ts"'), 'backend/src/a.ts');
     assert.equal(sanitizeRepoPath('`backend/src/a.ts`'), 'backend/src/a.ts');
+  });
+
+  it('rejects lone commas and picks the first real path from a list', () => {
+    assert.equal(sanitizeRepoPath(','), '');
+    assert.equal(sanitizeRepoPath(',,'), '');
+    assert.equal(isPlausibleRepoPath(','), false);
+    assert.equal(sanitizeRepoPath('backend/src/a.ts, backend/src/b.ts'), 'backend/src/a.ts');
+    assert.equal(sanitizeRepoPath(',backend/src/a.ts'), 'backend/src/a.ts');
   });
 });
 

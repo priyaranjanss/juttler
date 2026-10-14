@@ -8,6 +8,7 @@
 import { requiredString, requestJson } from '../shared';
 import { ToolExecutor } from '../shared';
 import {
+  isPlausibleRepoPath,
   resolvePathArg,
   sanitizeFileContent,
   sanitizeRepoPath,
@@ -16,9 +17,10 @@ import {
 /** Required repo-relative path — accepts file / file_path / … aliases. */
 function requiredPath(args: Record<string, any>): string {
   const path = resolvePathArg(args) || (typeof args.path === 'string' ? sanitizeRepoPath(args.path) : '');
-  if (!path) {
+  if (!path || !isPlausibleRepoPath(path)) {
     throw new Error(
-      'Missing required parameter "path". Pass a repo-relative file path, e.g. backend/src/services/slackFormat.ts (aliases file / file_path also work).'
+      'Missing or invalid "path". Pass one repo-relative file path like backend/src/services/slackFormat.ts ' +
+        '(not punctuation, not a comma list). Use list_tree or search_code first if you need the path.'
     );
   }
   return path;

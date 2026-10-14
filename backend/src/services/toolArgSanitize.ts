@@ -3,6 +3,17 @@
  * markdown fences. Clean those before hitting provider APIs — no ticket-specific logic.
  */
 
+/** True when a string looks like a real repo-relative file/folder path. */
+export function isPlausibleRepoPath(path: string): boolean {
+  const p = String(path ?? '').trim();
+  if (!p || p.length > 512) return false;
+  // Lone punctuation (e.g. ",") must never hit the GitHub API.
+  if (!/[A-Za-z0-9]/.test(p)) return false;
+  if (p === '.' || p === '..' || p.includes('://')) return false;
+  if (/(^|\/)\.\.(\/|$)/.test(p)) return false;
+  return true;
+}
+
 /** Repo-relative path: strip braces/quotes/whitespace junk models leave on args. */
 export function sanitizeRepoPath(raw: string): string {
   let path = String(raw ?? '').trim();
@@ -22,7 +33,18 @@ export function sanitizeRepoPath(raw: string): string {
     path = next;
   }
 
-  return path.replace(/^\/+/, '').replace(/\\/g, '/');
+  path = path.replace(/^\/+/, '').replace(/\\/g, '/');
+
+  // Models sometimes send "a.ts, b.ts" or a leading comma — use the first real path.
+  if (path.includes(',')) {
+    const parts = path
+      .split(',')
+      .map((part) => part.trim().replace(/^\/+/, ''))
+      .filter((part) => isPlausibleRepoPath(part));
+    path = parts[0] ?? '';
+  }
+
+  return isPlausibleRepoPath(path) ? path : '';
 }
 
 /** Soften write payloads when the model wraps the whole file in a markdown fence. */
@@ -48,14 +70,26 @@ const PATH_ALIASES = [
 
 /** Coerce a string-ish value the model used for a file path. */
 function coercePathValue(value: unknown): string | null {
-  if (typeof value === 'string' && value.trim()) return sanitizeRepoPath(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return sanitizeRepoPath(String(value));
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
+  if (typeof value === 'string' && value.trim()) {
+    const cleaned = sanitizeRepoPath(value);
+    return cleaned || null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const cleaned = sanitizeRepoPath(String(value));
+    return cleaned || null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const cleaned = coercePathValue(item);
+      if (cleaned) return cleaned;
+    }
+    return null;
+  }
+  if (value && typeof value === 'object') {
     const row = value as Record<string, unknown>;
     for (const key of PATH_ALIASES) {
-      if (typeof row[key] === 'string' && String(row[key]).trim()) {
-        return sanitizeRepoPath(String(row[key]));
-      }
+      const cleaned = coercePathValue(row[key]);
+      if (cleaned) return cleaned;
     }
   }
   return null;
