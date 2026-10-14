@@ -1,5 +1,10 @@
 import { Bot, Message } from '../types';
 import { AUTONOMY_RULES } from '../config/autonomy';
+import {
+  contentLooksLikeToolMarkup,
+  extractEmbeddedToolCalls,
+  stripEmbeddedToolMarkup,
+} from './embeddedToolCalls';
 
 // Every bot must have its own explicit model and key. Never fall back to a
 // workspace credential: that would make bots share both identity and billing.
@@ -111,33 +116,100 @@ type ChatMessage = {
 // specialist, then answer. Five rounds runs out mid-flow and leaves the user
 // with an error instead of a reply, so keep this generous; rounds now stop early
 // on their own when a round gains nothing useful.
-// Ticket → branch → PR needs more steps than a single lookup.
 const MAX_TOOL_ROUNDS = 18;
 const MAX_GATEWAY_ATTEMPTS = 3;
 const MAX_CONTEXT_ITEM_CHARS = 8_000;
+/** Keep tool payloads small so the model still has room to answer. */
+const MAX_TOOL_RESULT_CHARS = 2_500;
+const EXPLORE_TOOLS = new Set([
+  'github.list_files',
+  'github.get_file',
+  'github.list_commits',
+  'github.list_prs',
+  'jira.search_tickets',
+  'jira.list_projects',
+  'jira.list_transitions',
+  'jira.get_ticket',
+]);
+const ACT_TOOLS = new Set([
+  'github.write_file',
+  'github.create_branch',
+  'github.create_pull_request',
+  'github.comment_pr',
+  'github.create_issue',
+  'jira.create_ticket',
+  'jira.update_ticket',
+  'jira.change_status',
+  'jira.add_comment',
+  'jira.assign_ticket',
+]);
 
 function stringifyContext(value: unknown): string {
   if (typeof value === 'string') return value;
   return JSON.stringify(value ?? null) ?? String(value);
 }
 
-/** Compact digest for forced finals and empty-model fallbacks. */
+function truncateForModel(value: unknown, max = MAX_TOOL_RESULT_CHARS): string {
+  const text = stringifyContext(value);
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** Short notes for the model when forcing a final answer (not shown raw to users). */
 function summarizeToolEvents(events: ToolEvent[]): string {
   if (events.length === 0) return 'No tools ran.';
   return events
     .map((event) => {
       if (event.status === 'failed' || event.status === 'unavailable') {
-        return `- ${event.toolName}: failed — ${event.error || stringifyContext(event.result)}`;
+        return `- ${event.toolName}: failed — ${event.error || 'error'}`;
       }
       if (event.status === 'needs_approval') {
         return `- ${event.toolName}: waiting for approval`;
       }
-      const result = event.result;
-      if (result == null) return `- ${event.toolName}: ok`;
-      const snippet = stringifyContext(result);
-      return `- ${event.toolName}: ok — ${snippet.length > 400 ? `${snippet.slice(0, 400)}…` : snippet}`;
+      const highlight = highlightToolResult(event.toolName, event.result);
+      return highlight ? `- ${event.toolName}: ok — ${highlight}` : `- ${event.toolName}: ok`;
     })
     .join('\n');
+}
+
+/** Pull a few useful fields so fallbacks stay readable. */
+function highlightToolResult(toolName: string, result: unknown): string {
+  if (!result || typeof result !== 'object') return '';
+  const row = result as Record<string, any>;
+  const bits: string[] = [];
+  if (row.key) bits.push(String(row.key));
+  if (row.summary) bits.push(String(row.summary));
+  if (row.status) bits.push(`status ${row.status}`);
+  if (row.transition || row.to) bits.push(`→ ${row.to || row.transition}`);
+  if (row.branch) bits.push(`branch ${row.branch}`);
+  if (row.html_url || row.url || row.pr_url) bits.push(String(row.html_url || row.url || row.pr_url));
+  if (row.path) bits.push(String(row.path));
+  if (typeof row.returned === 'number') bits.push(`${row.returned} rows`);
+  if (Array.isArray(row.entries)) bits.push(`${row.entries.length} entries`);
+  if (row.error) bits.push(String(row.error));
+  if (bits.length === 0 && toolName) return truncateForModel(result, 160);
+  return bits.join(' · ');
+}
+
+/** User-facing fallback when the model returns an empty final message. */
+function userFacingToolSummary(events: ToolEvent[]): string {
+  if (events.length === 0) return 'I could not complete that.';
+  const lines: string[] = [];
+  for (const event of events) {
+    if (event.status === 'needs_approval') {
+      lines.push(`• ${event.toolName} is waiting for your approval.`);
+      continue;
+    }
+    if (event.status === 'failed' || event.status === 'unavailable') {
+      const err = (event.error || 'failed').replace(/\s+/g, ' ').trim();
+      lines.push(`• ${event.toolName} failed: ${err.slice(0, 180)}`);
+      continue;
+    }
+    const highlight = highlightToolResult(event.toolName, event.result);
+    if (highlight) lines.push(`• ${highlight}`);
+  }
+  const unique = [...new Set(lines)].slice(0, 12);
+  if (unique.length === 0) return 'I ran tools but have nothing useful to report yet.';
+  return `Here is what I got so far:\n${unique.join('\n')}`;
 }
 
 function buildToolCapabilityContext(tools: BotToolSpec[]): string {
@@ -332,6 +404,7 @@ export async function runBotTurn(params: {
   let usage: TurnResult['tokenUsage'];
   // Set when the tool loop should stop early and go straight to the final answer.
   let stopToolLoop = false;
+  let exploreStreak = 0;
 
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS && !stopToolLoop; round++) {
@@ -382,24 +455,49 @@ export async function runBotTurn(params: {
 
       const choice = data.choices?.[0];
       const message = choice?.message;
-      const toolCalls = message?.tool_calls ?? [];
+      const rawContent = typeof message?.content === 'string' ? message.content : '';
+      let toolCalls = message?.tool_calls ?? [];
 
-      // Final answer
+      // Some models emit tool requests as XML in content instead of tool_calls.
+      if (toolCalls.length === 0 && contentLooksLikeToolMarkup(rawContent)) {
+        toolCalls = extractEmbeddedToolCalls(
+          rawContent,
+          tools.map((tool) => tool.name)
+        );
+      }
+
+      // Final answer (no tools to run)
       if (toolCalls.length === 0) {
-        const text = message?.content ?? '';
+        const text = stripEmbeddedToolMarkup(rawContent);
         if (!text) {
-          return { tools: collected, tokenUsage: usage, waitingForApproval: false, error: { kind: 'bad_response', message: 'Gateway returned no content.' } };
+          const digest = summarizeToolEvents(collected);
+          if (digest && digest !== 'No tools ran.') {
+            return {
+              text: `I ran tools but the model returned an empty reply. Progress:\n${digest}`,
+              tools: collected,
+              tokenUsage: usage,
+              waitingForApproval: false,
+            };
+          }
+          return {
+            tools: collected,
+            tokenUsage: usage,
+            waitingForApproval: false,
+            error: { kind: 'bad_response', message: 'Gateway returned no content.' },
+          };
         }
         return { text, tools: collected, tokenUsage: usage, waitingForApproval: false };
       }
 
-      // The model wants to act: record its request, then execute through the gateway
+      // The model wants to act: record its request, then execute through the gateway.
+      // Never keep raw tool markup in the assistant content sent back to the model.
+      const visibleContent = stripEmbeddedToolMarkup(rawContent);
       messages.push({
         role: 'assistant',
-        content: message?.content ?? null,
+        content: visibleContent || null,
         tool_calls: toolCalls.map((tc) => ({
           id: tc.id,
-          type: 'function',
+          type: 'function' as const,
           function: { name: tc.function.name, arguments: tc.function.arguments },
         })),
       });
@@ -490,10 +588,14 @@ export async function runBotTurn(params: {
           error: execution.ok ? undefined : String((execution.result as any)?.error ?? 'Tool failed'),
           durationMs: execution.durationMs,
         });
+
+        if (execution.ok && ACT_TOOLS.has(call.function.name)) exploreStreak = 0;
+        else if (execution.ok && EXPLORE_TOOLS.has(call.function.name)) exploreStreak += 1;
+
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: `${JSON.stringify(execution.result ?? {})}\nIf this does not finish the user's request, call the next tool before you reply.`,
+          content: `${truncateForModel(execution.result ?? {})}\nIf this does not finish the user's request, call the next tool before you reply.`,
         });
       }
 
@@ -502,6 +604,18 @@ export async function runBotTurn(params: {
       const gainedNothing = collected.length > 0 && collected.every((e) => e.status === 'unavailable');
       if (gainedNothing) {
         stopToolLoop = true;
+      }
+
+      // Too much browsing without acting — push the model to finish the work.
+      if (!stopToolLoop && exploreStreak >= 5) {
+        messages.push({
+          role: 'system',
+          content:
+            'You already have enough read context. Stop listing or re-reading files. ' +
+            'Take the next action that finishes the user request (write, create, update, transition, comment, or reply). ' +
+            'If you cannot act, answer the user now with what you know.',
+        });
+        exploreStreak = 0;
       }
     }
 
@@ -516,16 +630,18 @@ export async function runBotTurn(params: {
     // from dying as "stopped after N tool rounds".
     // ---------------------------------------------------------------------
     const toolDigest = summarizeToolEvents(collected);
+    // Slim context: huge browse transcripts make the model return empty content.
+    const slimHistory = messages.filter((m) => m.role === 'system' || m.role === 'user').slice(0, 6);
     const finalMessages: ChatMessage[] = [
-      ...messages,
+      ...slimHistory,
       {
         role: 'system',
         content:
-          'You cannot call any more tools now. Using only what you already have, answer the user directly and completely. ' +
-          'If part of the request could not be completed, say exactly which part and what failed. ' +
-          'Do not ask to call a tool again, and do not repeat a question you already asked.\n\n' +
-          `Tool outcomes this turn:\n${toolDigest}`,
+          'You cannot call any more tools. Write a clear reply for the user from these outcomes. ' +
+          'No JSON dumps, no XML, no tool markup. Say what you did, what is left, and any blockers.\n\n' +
+          `Outcomes:\n${toolDigest}`,
       },
+      { role: 'user', content: params.messageContent },
     ];
 
     const finalRes = await fetchGateway(url, {
@@ -537,8 +653,8 @@ export async function runBotTurn(params: {
       body: JSON.stringify({
         model,
         messages: finalMessages,
-        max_tokens: 2048,
-        temperature: 0.4,
+        max_tokens: 1200,
+        temperature: 0.3,
       }),
     });
 
@@ -550,10 +666,9 @@ export async function runBotTurn(params: {
       } catch {
         // no JSON body
       }
-      // Prefer a digest over a hard failure so Slack still gets progress.
-      if (toolDigest && toolDigest !== 'No tools ran.') {
+      if (collected.length > 0) {
         return {
-          text: `I hit a model error after running tools (${finalRes.status}${detail}). Here is what already ran:\n${toolDigest}`,
+          text: userFacingToolSummary(collected),
           tools: collected,
           tokenUsage: usage,
           waitingForApproval: false,
@@ -576,15 +691,14 @@ export async function runBotTurn(params: {
       };
     }
 
-    const finalText = finalData.choices?.[0]?.message?.content ?? '';
-    if (finalText.trim()) {
+    const finalText = stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? '');
+    if (finalText.trim() && !contentLooksLikeToolMarkup(finalText)) {
       return { text: finalText, tools: collected, tokenUsage: usage, waitingForApproval: false };
     }
 
-    // Model returned empty — still tell the user what tools did so Slack is not blank.
-    if (toolDigest && toolDigest !== 'No tools ran.') {
+    if (collected.length > 0) {
       return {
-        text: `I ran tools but could not draft a full summary. Progress:\n${toolDigest}`,
+        text: userFacingToolSummary(collected),
         tools: collected,
         tokenUsage: usage,
         waitingForApproval: false,

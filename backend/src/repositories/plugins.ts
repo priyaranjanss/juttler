@@ -592,11 +592,10 @@ export async function getToolPermission(userId: string, botId: string, toolName:
     return { installed: true, installedButNoAccess: false, enabled: false, sensitive, pluginSlug: ownerSlug };
   }
 
-  const stored = (access.enabled_tools || []).map((name) => {
-    const resolved = resolveTool(registry, name);
-    return resolved ? resolved.id : name;
-  });
-  const enabled = stored.includes(record.id);
+  // A non-empty grant means the plugin is on for this bot — every current tool
+  // of that plugin is allowed (same rule as listBotAvailableTools). New tools
+  // added later must not appear "disabled" until someone re-toggles the switch.
+  const enabled = (access.enabled_tools || []).length > 0;
   return {
     installed: true,
     installedButNoAccess: !enabled,

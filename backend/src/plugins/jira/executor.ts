@@ -20,9 +20,19 @@ function jiraBase(ctx: { credential: Record<string, any> }): string {
   return `https://${host}`;
 }
 
-/** Issue keys are uppercase (ICS-9). Lowercase ics-9 often 404s. */
+/**
+ * Normalize an issue key from whatever the model passes.
+ * Pulls out PROJ-123 when present; rejects junk like "}}-9".
+ */
 function issueKey(value: string): string {
-  return value.trim().toUpperCase();
+  const upper = String(value ?? '').trim().toUpperCase();
+  const match = upper.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
+  if (match) return match[1];
+  const cleaned = upper.replace(/[^A-Z0-9-]/g, '');
+  if (/^[A-Z][A-Z0-9]+-\d+$/.test(cleaned)) return cleaned;
+  throw new Error(
+    `"${value}" is not a Jira issue key. Use a key like ABC-123.`
+  );
 }
 
 /** Flattens Atlassian document JSON into plain text for the model. */

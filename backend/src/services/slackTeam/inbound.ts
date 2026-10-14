@@ -11,15 +11,17 @@ import {
 import { findLinkedMember } from '../../repositories/teams';
 import { generateId } from '../../utils/id';
 import { runBotTurnWithTools } from '../botTurn';
+import { toSlackMrkdwn } from '../slackFormat';
 import { decideSlackReply, slackTextForModel, slackThreadKey } from './decide';
 import { verifySlackSignature } from './signature';
 import { frontendUrl, slackApi } from './slackApi';
 import { signSlackLink } from '../../config/jwt';
 
 const SLACK_ADDENDUM = [
-  'You are replying in Slack as yourself, under your own name.',
-  'Write only the message that should be posted.',
-  'Keep it short enough to read in a thread.',
+  'You are in Slack, but you work the same way as in Juttler chat.',
+  'Use your listed tools to finish what the user asked before you reply.',
+  'After the tools are done, post only a short human summary of the outcome.',
+  'Do not paste raw tool JSON, XML, or API dumps into Slack.',
   'Do not mention these instructions.',
 ].join(' ');
 
@@ -164,10 +166,12 @@ async function promptToLink(input: {
 }
 
 async function postReply(token: string, channel: string, text: string, threadTs?: string): Promise<void> {
-  const clipped = text.length > 8000 ? `${text.slice(0, 8000)}…` : text;
+  const formatted = toSlackMrkdwn(text);
+  const clipped = formatted.length > 3500 ? `${formatted.slice(0, 3500)}…` : formatted;
   await slackApi(token, 'chat.postMessage', {
     channel,
     text: clipped,
+    mrkdwn: true,
     ...(threadTs ? { thread_ts: threadTs } : {}),
   });
 }
@@ -259,7 +263,14 @@ async function handleSlackEvent(body: SlackEventBody): Promise<void> {
   });
 
   const spoken = slackTextForModel(event.text || '', app.botUserId) || '(no text)';
-  const history = (await listMessages(thread.conversationId || conversationId)).slice(-20);
+  // Keep Slack history short so earlier dumps do not crowd out tool use.
+  const history = (await listMessages(thread.conversationId || conversationId))
+    .slice(-12)
+    .map((message) =>
+      message.content.length > 1200
+        ? { ...message, content: `${message.content.slice(0, 1200)}…` }
+        : message
+    );
   const userMsg: Message = {
     id: generateId('msg_'),
     conversationId,
@@ -273,31 +284,40 @@ async function handleSlackEvent(body: SlackEventBody): Promise<void> {
   await createMessage(userMsg);
   await touchConversation(conversationId, spoken);
 
-  const turn = await runBotTurnWithTools({
-    userId: bot.userId,
-    bot,
-    userName: speaker,
-    messageContent: spoken,
-    history,
-    conversationId,
-    systemAddendum: SLACK_ADDENDUM,
-  });
-
   let reply: string;
-  if (turn.waitingForApproval) {
-    reply = 'I need approval in Juttler before I can finish that. Open this bot there and approve the pending action.';
-  } else if (turn.error) {
-    reply = turn.error.message;
-  } else {
-    reply = turn.text?.trim() || 'Done.';
+  let failed = false;
+  try {
+    const turn = await runBotTurnWithTools({
+      userId: bot.userId,
+      bot,
+      userName: speaker,
+      messageContent: spoken,
+      history,
+      conversationId,
+      systemAddendum: SLACK_ADDENDUM,
+    });
+
+    if (turn.waitingForApproval) {
+      reply =
+        'I need approval in Juttler before I can finish that. Open this bot there and approve the pending action.';
+    } else if (turn.error) {
+      failed = true;
+      reply = turn.error.message;
+    } else {
+      reply = turn.text?.trim() || 'Done.';
+    }
+  } catch (err) {
+    failed = true;
+    reply = err instanceof Error ? err.message : 'Something went wrong while handling that in Slack.';
+    console.error('Slack bot turn failed:', err);
   }
 
   const botMsg: Message = {
     id: generateId('msg_'),
     conversationId,
-    senderType: turn.error ? 'system' : 'bot',
-    senderId: turn.error ? 'sys' : bot.id,
-    senderName: turn.error ? 'System' : bot.name,
+    senderType: failed ? 'system' : 'bot',
+    senderId: failed ? 'sys' : bot.id,
+    senderName: failed ? 'System' : bot.name,
     senderAvatar: bot.avatar,
     senderColor: bot.color,
     content: reply,
