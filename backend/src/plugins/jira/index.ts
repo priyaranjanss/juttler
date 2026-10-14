@@ -37,7 +37,7 @@ export const jiraPlugin: PluginModule = {
       {
         name: 'create_ticket',
         description: 'Create a new issue in a project.',
-        sensitive: true,
+        sensitive: false,
         parameters: {
           type: 'object',
           properties: {
@@ -66,7 +66,7 @@ export const jiraPlugin: PluginModule = {
       {
         name: 'change_status',
         description: 'Transition an issue to a different status.',
-        sensitive: true,
+        sensitive: false,
         parameters: {
           type: 'object',
           properties: {
