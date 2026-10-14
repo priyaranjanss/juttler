@@ -35,4 +35,14 @@ describe('sanitizeToolArgs', () => {
     sanitizeToolArgs('github.get_file', args);
     assert.equal(args.path, 'backend/src/services/slackFormat.ts');
   });
+
+  it('fills path from file / file_path aliases', () => {
+    const viaFile: Record<string, unknown> = { file: 'backend/src/a.ts' };
+    sanitizeToolArgs('github.get_file', viaFile);
+    assert.equal(viaFile.path, 'backend/src/a.ts');
+
+    const viaFilePath: Record<string, unknown> = { file_path: 'src/b.ts' };
+    sanitizeToolArgs('github.get_file', viaFilePath);
+    assert.equal(viaFilePath.path, 'src/b.ts');
+  });
 });

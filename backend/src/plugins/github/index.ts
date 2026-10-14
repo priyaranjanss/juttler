@@ -42,7 +42,11 @@ export const githubPlugin: PluginModule = {
               type: 'string',
               description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
             },
-            path: { type: 'string', description: 'File path in the repo, e.g. "README.md"' },
+            path: {
+              type: 'string',
+              description:
+                'Repo-relative file path, e.g. "backend/src/file.ts". Required. Aliases file / file_path also accepted.',
+            },
             ref: { type: 'string', description: 'Branch, tag, or commit SHA (defaults to the default branch)' },
           },
           required: ['path'],

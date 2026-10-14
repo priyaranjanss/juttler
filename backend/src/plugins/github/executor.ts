@@ -7,7 +7,22 @@
 
 import { requiredString, requestJson } from '../shared';
 import { ToolExecutor } from '../shared';
-import { sanitizeFileContent, sanitizeRepoPath } from '../../services/toolArgSanitize';
+import {
+  resolvePathArg,
+  sanitizeFileContent,
+  sanitizeRepoPath,
+} from '../../services/toolArgSanitize';
+
+/** Required repo-relative path — accepts file / file_path / … aliases. */
+function requiredPath(args: Record<string, any>): string {
+  const path = resolvePathArg(args) || (typeof args.path === 'string' ? sanitizeRepoPath(args.path) : '');
+  if (!path) {
+    throw new Error(
+      'Missing required parameter "path". Pass a repo-relative file path, e.g. backend/src/services/slackFormat.ts (aliases file / file_path also work).'
+    );
+  }
+  return path;
+}
 
 /** Accepts "owner/name" or a full GitHub URL. */
 function parseRepo(value: string): { owner: string; repo: string } {
@@ -120,8 +135,7 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   get_file: async (args, ctx) => {
-    const path = sanitizeRepoPath(requiredString(args, 'path'));
-    if (!path) throw new Error('path is required (repo-relative, e.g. backend/src/file.ts).');
+    const path = requiredPath(args);
     const encoded = encodeRepoPath(path);
     const ref = args.ref ? `?ref=${encodeURIComponent(String(args.ref))}` : '';
     const headers = githubHeaders(ctx);
@@ -347,8 +361,7 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   write_file: async (args, ctx) => {
-    const path = sanitizeRepoPath(requiredString(args, 'path'));
-    if (!path) throw new Error('path is required (repo-relative, e.g. backend/src/file.ts).');
+    const path = requiredPath(args);
     const content = sanitizeFileContent(requiredString(args, 'content'));
     const branch = sanitizeBranchName(requiredString(args, 'branch'));
     const message = requiredString(args, 'message');
@@ -454,8 +467,7 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   delete_file: async (args, ctx) => {
-    const path = sanitizeRepoPath(requiredString(args, 'path'));
-    if (!path) throw new Error('path is required (repo-relative).');
+    const path = requiredPath(args);
     const branch = sanitizeBranchName(requiredString(args, 'branch'));
     const message = requiredString(args, 'message');
     if (!branch) throw new Error('branch is required.');

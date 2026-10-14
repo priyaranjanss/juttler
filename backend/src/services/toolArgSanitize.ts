@@ -33,9 +33,54 @@ export function sanitizeFileContent(raw: string): string {
   return fenced ? fenced[1] : text;
 }
 
+const PATH_ALIASES = [
+  'path',
+  'file',
+  'file_path',
+  'filepath',
+  'filePath',
+  'filename',
+  'file_name',
+  'name',
+  'target',
+  'src',
+] as const;
+
+/** Coerce a string-ish value the model used for a file path. */
+function coercePathValue(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return sanitizeRepoPath(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return sanitizeRepoPath(String(value));
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const row = value as Record<string, unknown>;
+    for (const key of PATH_ALIASES) {
+      if (typeof row[key] === 'string' && String(row[key]).trim()) {
+        return sanitizeRepoPath(String(row[key]));
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Fill `path` from common model aliases (file, file_path, …).
+ * Returns the resolved path or null when still missing.
+ */
+export function resolvePathArg(args: Record<string, unknown>): string | null {
+  for (const key of PATH_ALIASES) {
+    const resolved = coercePathValue(args[key]);
+    if (resolved) {
+      args.path = resolved;
+      return resolved;
+    }
+  }
+  return null;
+}
+
 /** Mutates known string args in place for GitHub / Jira tools. */
 export function sanitizeToolArgs(toolName: string, args: Record<string, unknown>): void {
-  if (typeof args.path === 'string') {
+  if (toolName.startsWith('github.')) {
+    resolvePathArg(args);
+  } else if (typeof args.path === 'string') {
     args.path = sanitizeRepoPath(args.path);
   }
   if (typeof args.content === 'string' && /\.write_file$/.test(toolName)) {
