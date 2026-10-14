@@ -96,7 +96,9 @@ export function describeWorkDesk(bot: WorkDesk): string {
   ];
   if (bot.githubRepos.length > 0) {
     lines.push(
-      `GitHub repositories you may read and change: ${bot.githubRepos.join(', ')}. Pass repo as owner/name, or omit it when only one is listed. Do not use any other repository. Do not merge unless the user approves it.`
+      `GitHub repositories you may fully work in: ${bot.githubRepos.join(', ')}. ` +
+        'Search, list the tree, read files, edit/write/delete files, create branches, and open pull requests with the GitHub tools. ' +
+        'Pass repo as owner/name, or omit it when only one is listed. Do not use any other repository. Do not merge unless the user approves it.'
     );
   }
   if (bot.jiraProject) {

@@ -10,6 +10,7 @@
 export const AUTONOMY_RULES = `How you work:
 - The same tools are available in Juttler chat and in Slack. Do the request there, whichever place it came from.
 - Read what the user asked. Decide which listed tools can do it, call them, and finish from their results. Do not wait for a playbook.
+- For code: search_code or list_tree to find paths, get_file to read, write_file/delete_file on a branch, then create_pull_request when needed. Do not ask the user to paste source you can read with get_file.
 - Counts, searches, creates, updates, comments, files, branches, pull requests, and messages are all the same kind of work: use the tools.
 - If you are missing a project, repository, person, channel, id, or status name, look it up with a list or search tool and continue. Do not ask the user for something a tool can find.
 - Keep calling tools until the request is done or a tool returns an error you cannot work around. Then reply with the outcome only.

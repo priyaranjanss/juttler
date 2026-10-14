@@ -119,20 +119,22 @@ type ChatMessage = {
 const MAX_TOOL_ROUNDS = 18;
 const MAX_GATEWAY_ATTEMPTS = 3;
 const MAX_CONTEXT_ITEM_CHARS = 8_000;
-/** Keep tool payloads small so the model still has room to answer. */
-const MAX_TOOL_RESULT_CHARS = 2_500;
+/** Default cap for tool JSON in the model context. File reads get a higher cap. */
+const MAX_TOOL_RESULT_CHARS = 3_500;
+const MAX_FILE_RESULT_CHARS = 14_000;
 const EXPLORE_TOOLS = new Set([
   'github.list_files',
-  'github.get_file',
+  'github.list_tree',
   'github.list_commits',
   'github.list_prs',
+  'github.list_branches',
   'jira.search_tickets',
   'jira.list_projects',
   'jira.list_transitions',
-  'jira.get_ticket',
 ]);
 const ACT_TOOLS = new Set([
   'github.write_file',
+  'github.delete_file',
   'github.create_branch',
   'github.create_pull_request',
   'github.comment_pr',
@@ -171,23 +173,70 @@ function summarizeToolEvents(events: ToolEvent[]): string {
     .join('\n');
 }
 
-/** Pull a few useful fields so fallbacks stay readable. */
+/** Pull useful fields so fallbacks / forced finals still carry real substance. */
 function highlightToolResult(toolName: string, result: unknown): string {
   if (!result || typeof result !== 'object') return '';
   const row = result as Record<string, any>;
+
+  // File reads must keep code text — path-only digests made the model think files were empty.
+  if (toolName === 'github.get_file' && typeof row.content === 'string') {
+    const body = row.content.length > 6_000 ? `${row.content.slice(0, 6_000)}…` : row.content;
+    return `${row.path || 'file'} (size ${row.size ?? body.length}${row.truncated ? ', truncated' : ''}):\n${body}`;
+  }
+  if (toolName === 'github.search_code' && Array.isArray(row.results)) {
+    return row.results
+      .slice(0, 12)
+      .map((hit: any) => {
+        const frag = hit.matches?.[0]?.fragment;
+        return frag ? `${hit.path}: ${String(frag).slice(0, 240)}` : String(hit.path || '');
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
   const bits: string[] = [];
   if (row.key) bits.push(String(row.key));
   if (row.summary) bits.push(String(row.summary));
+  if (row.description && typeof row.description === 'string') {
+    bits.push(row.description.length > 400 ? `${row.description.slice(0, 400)}…` : row.description);
+  }
   if (row.status) bits.push(`status ${row.status}`);
   if (row.transition || row.to) bits.push(`→ ${row.to || row.transition}`);
   if (row.branch) bits.push(`branch ${row.branch}`);
   if (row.html_url || row.url || row.pr_url) bits.push(String(row.html_url || row.url || row.pr_url));
-  if (row.path) bits.push(String(row.path));
+  if (row.path && toolName !== 'github.get_file') bits.push(String(row.path));
   if (typeof row.returned === 'number') bits.push(`${row.returned} rows`);
   if (Array.isArray(row.entries)) bits.push(`${row.entries.length} entries`);
   if (row.error) bits.push(String(row.error));
   if (bits.length === 0 && toolName) return truncateForModel(result, 160);
   return bits.join(' · ');
+}
+
+function toolResultBudget(toolName: string): number {
+  if (
+    toolName === 'github.get_file' ||
+    toolName === 'github.search_code' ||
+    toolName === 'github.list_tree' ||
+    toolName === 'jira.get_ticket'
+  ) {
+    return MAX_FILE_RESULT_CHARS;
+  }
+  return MAX_TOOL_RESULT_CHARS;
+}
+
+/** Short line for Slack/UI when the model fails to write a real reply. */
+function shortUserHighlight(toolName: string, result: unknown): string {
+  if (!result || typeof result !== 'object') return toolName;
+  const row = result as Record<string, any>;
+  if (toolName === 'github.get_file' && row.path) {
+    return `Read ${row.path}${typeof row.size === 'number' ? ` (${row.size} bytes)` : ''}`;
+  }
+  if (row.key && row.summary) return `${row.key}: ${row.summary}`;
+  if (row.html_url || row.url || row.pr_url) return String(row.html_url || row.url || row.pr_url);
+  if (row.branch) return `Branch ${row.branch}`;
+  if (row.path) return String(row.path);
+  if (Array.isArray(row.entries)) return `Listed ${row.entries.length} paths`;
+  return toolName;
 }
 
 /** User-facing fallback when the model returns an empty final message. */
@@ -204,8 +253,7 @@ function userFacingToolSummary(events: ToolEvent[]): string {
       lines.push(`• ${event.toolName} failed: ${err.slice(0, 180)}`);
       continue;
     }
-    const highlight = highlightToolResult(event.toolName, event.result);
-    if (highlight) lines.push(`• ${highlight}`);
+    lines.push(`• ${shortUserHighlight(event.toolName, event.result)}`);
   }
   const unique = [...new Set(lines)].slice(0, 12);
   if (unique.length === 0) return 'I ran tools but have nothing useful to report yet.';
@@ -595,7 +643,7 @@ export async function runBotTurn(params: {
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: `${truncateForModel(execution.result ?? {})}\nIf this does not finish the user's request, call the next tool before you reply.`,
+          content: `${truncateForModel(execution.result ?? {}, toolResultBudget(call.function.name))}\nIf this does not finish the user's request, call the next tool before you reply.`,
         });
       }
 
@@ -606,14 +654,15 @@ export async function runBotTurn(params: {
         stopToolLoop = true;
       }
 
-      // Too much browsing without acting — push the model to finish the work.
-      if (!stopToolLoop && exploreStreak >= 5) {
+      // Too much directory browsing without acting — push the model to finish.
+      // Reading file contents does not count; that is real developer work.
+      if (!stopToolLoop && exploreStreak >= 6) {
         messages.push({
           role: 'system',
           content:
-            'You already have enough read context. Stop listing or re-reading files. ' +
-            'Take the next action that finishes the user request (write, create, update, transition, comment, or reply). ' +
-            'If you cannot act, answer the user now with what you know.',
+            'You have listed enough paths. Read the specific files you need with get_file if you have not, then act ' +
+            '(write_file, create_branch, create_pull_request, update/comment/transition, or answer). ' +
+            'Do not claim you cannot see code if get_file already returned content.',
         });
         exploreStreak = 0;
       }
@@ -630,7 +679,17 @@ export async function runBotTurn(params: {
     // from dying as "stopped after N tool rounds".
     // ---------------------------------------------------------------------
     const toolDigest = summarizeToolEvents(collected);
-    // Slim context: huge browse transcripts make the model return empty content.
+    // Keep recent file/ticket reads in the forced final so the model still has code context.
+    const recentReads = collected
+      .filter(
+        (event) =>
+          event.status === 'success' &&
+          (event.toolName === 'github.get_file' || event.toolName === 'jira.get_ticket')
+      )
+      .slice(-4)
+      .map((event) => highlightToolResult(event.toolName, event.result))
+      .filter(Boolean)
+      .join('\n\n');
     const slimHistory = messages.filter((m) => m.role === 'system' || m.role === 'user').slice(0, 6);
     const finalMessages: ChatMessage[] = [
       ...slimHistory,
@@ -638,8 +697,10 @@ export async function runBotTurn(params: {
         role: 'system',
         content:
           'You cannot call any more tools. Write a clear reply for the user from these outcomes. ' +
-          'No JSON dumps, no XML, no tool markup. Say what you did, what is left, and any blockers.\n\n' +
-          `Outcomes:\n${toolDigest}`,
+          'No JSON dumps, no XML, no tool markup. Say what you did, what is left, and any blockers. ' +
+          'If file contents are included below, you have already read them — use them; do not ask the user to paste code.\n\n' +
+          `Outcomes:\n${toolDigest}` +
+          (recentReads ? `\n\nFile / ticket contents you already read:\n${recentReads}` : ''),
       },
       { role: 'user', content: params.messageContent },
     ];

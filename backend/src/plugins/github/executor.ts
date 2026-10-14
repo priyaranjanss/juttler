@@ -68,18 +68,49 @@ export const githubTools: Record<string, ToolExecutor> = {
   },
 
   get_file: async (args, ctx) => {
-    const path = requiredString(args, 'path');
+    const path = requiredString(args, 'path').replace(/^\/+/, '');
+    const encoded = encodeRepoPath(path);
     const ref = args.ref ? `?ref=${encodeURIComponent(String(args.ref))}` : '';
-    const data = await requestJson(`${repoUrl(args, `/contents/${path}`)}${ref}`, {
-      headers: githubHeaders(ctx),
-    });
+    const headers = githubHeaders(ctx);
+    const data = await requestJson(`${repoUrl(args, `/contents/${encoded}`)}${ref}`, { headers });
 
     if (Array.isArray(data)) {
-      return { path, type: 'dir', entries: data.map((e: any) => ({ name: e.name, type: e.type })) };
+      return {
+        path,
+        type: 'dir',
+        entries: data.map((entry: any) => ({ name: entry.name, path: entry.path, type: entry.type })),
+      };
     }
 
-    const content = data.content ? Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8') : null;
-    return { path, type: 'file', size: data.size, truncated: Boolean(data.content === ''), content };
+    let content: string | null = null;
+    if (typeof data.content === 'string' && data.content.length > 0) {
+      content = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
+    } else if (typeof data.download_url === 'string' && data.download_url) {
+      // Larger files omit base64 `content`; fetch the raw file instead.
+      const downloaded = await fetch(data.download_url, { headers });
+      if (!downloaded.ok) {
+        throw new Error(`GET ${path} download failed (${downloaded.status})`);
+      }
+      content = await downloaded.text();
+    }
+
+    if (content == null) {
+      throw new Error(
+        `Could not read "${path}". The GitHub API returned no file body — check the path and token repo access.`
+      );
+    }
+
+    // Keep a large readable slice for the model; note when the file is longer.
+    const maxChars = 100_000;
+    const truncated = content.length > maxChars;
+    return {
+      path,
+      type: 'file',
+      size: typeof data.size === 'number' ? data.size : content.length,
+      sha: data.sha ?? null,
+      truncated,
+      content: truncated ? content.slice(0, maxChars) : content,
+    };
   },
 
   list_commits: async (args, ctx) => {
@@ -173,6 +204,99 @@ export const githubTools: Record<string, ToolExecutor> = {
     };
   },
 
+  list_tree: async (args, ctx) => {
+    const headers = githubHeaders(ctx);
+    const repoInfo = await requestJson(repoUrl(args), { headers });
+    const refName = args.ref ? String(args.ref) : repoInfo.default_branch;
+    if (!refName) throw new Error('Could not determine the default branch.');
+
+    let sha: string | null = null;
+    try {
+      const ref = await requestJson(`${repoUrl(args, `/git/ref/heads/${encodeURIComponent(refName)}`)}`, {
+        headers,
+      });
+      sha = ref.object?.sha ?? null;
+    } catch {
+      const commit = await requestJson(`${repoUrl(args, `/commits/${encodeURIComponent(refName)}`)}`, {
+        headers,
+      });
+      sha = commit.sha ?? commit.commit?.tree?.sha ?? null;
+    }
+    if (!sha) throw new Error(`Could not resolve ref "${refName}".`);
+
+    const tree = await requestJson(`${repoUrl(args, `/git/trees/${sha}`)}?recursive=1`, { headers });
+    const prefix = typeof args.path === 'string' ? args.path.replace(/^\/+|\/+$/g, '') : '';
+    let paths = (tree.tree ?? [])
+      .filter((node: any) => node?.path && (node.type === 'blob' || node.type === 'tree'))
+      .map((node: any) => ({ path: node.path as string, type: node.type === 'tree' ? 'dir' : 'file', size: node.size }));
+    if (prefix) {
+      paths = paths.filter(
+        (node: { path: string }) => node.path === prefix || node.path.startsWith(`${prefix}/`)
+      );
+    }
+    const limit = Math.min(Math.max(Number(args.max_results) || 400, 1), 800);
+    return {
+      repo: requiredString(args, 'repo'),
+      ref: refName,
+      path: prefix || '/',
+      truncated: Boolean(tree.truncated) || paths.length > limit,
+      total: paths.length,
+      entries: paths.slice(0, limit),
+    };
+  },
+
+  search_code: async (args, ctx) => {
+    const query = requiredString(args, 'query');
+    const { owner, repo } = parseRepo(requiredString(args, 'repo'));
+    const pathFilter =
+      typeof args.path === 'string' && args.path.trim()
+        ? ` path:${args.path.trim().replace(/^\/+|\/+$/g, '')}`
+        : '';
+    const q = `${query} repo:${owner}/${repo}${pathFilter}`;
+    const limit = Math.min(Math.max(Number(args.max_results) || 20, 1), 50);
+    const data = await requestJson(
+      `https://api.github.com/search/code?q=${encodeURIComponent(q)}&per_page=${limit}`,
+      {
+        headers: {
+          ...githubHeaders(ctx),
+          Accept: 'application/vnd.github.text-match+json',
+        },
+      }
+    );
+    const items = (data.items ?? []).map((item: any) => ({
+      path: item.path,
+      name: item.name,
+      url: item.html_url,
+      score: item.score,
+      matches: (item.text_matches ?? []).map((match: any) => ({
+        fragment: match.fragment,
+        property: match.property,
+      })),
+    }));
+    return {
+      repo: `${owner}/${repo}`,
+      query: q,
+      total: typeof data.total_count === 'number' ? data.total_count : items.length,
+      returned: items.length,
+      results: items,
+    };
+  },
+
+  list_branches: async (args, ctx) => {
+    const data = await requestJson(`${repoUrl(args, '/branches')}?per_page=100`, {
+      headers: githubHeaders(ctx),
+    });
+    return {
+      repo: requiredString(args, 'repo'),
+      total: data.length,
+      branches: data.map((branch: any) => ({
+        name: branch.name,
+        protected: Boolean(branch.protected),
+        sha: branch.commit?.sha,
+      })),
+    };
+  },
+
   write_file: async (args, ctx) => {
     const path = requiredString(args, 'path').replace(/^\/+/, '');
     const content = requiredString(args, 'content');
@@ -252,5 +376,30 @@ export const githubTools: Record<string, ToolExecutor> = {
       },
     });
     return { merged: Boolean(data.merged), sha: data.sha, message: data.message };
+  },
+
+  delete_file: async (args, ctx) => {
+    const path = requiredString(args, 'path').replace(/^\/+/, '');
+    const branch = requiredString(args, 'branch');
+    const message = requiredString(args, 'message');
+    const headers = githubHeaders(ctx);
+    const encoded = encodeRepoPath(path);
+    const existing = await requestJson(
+      `${repoUrl(args, `/contents/${encoded}`)}?ref=${encodeURIComponent(branch)}`,
+      { headers }
+    );
+    if (Array.isArray(existing) || !existing?.sha) {
+      throw new Error(`"${path}" is not a file on branch ${branch}.`);
+    }
+    await requestJson(repoUrl(args, `/contents/${encoded}`), {
+      method: 'DELETE',
+      headers,
+      body: {
+        message,
+        sha: existing.sha,
+        branch,
+      },
+    });
+    return { deleted: true, path, branch };
   },
 };
