@@ -121,7 +121,7 @@ const MAX_GATEWAY_ATTEMPTS = 3;
 const MAX_CONTEXT_ITEM_CHARS = 8_000;
 /** Default cap for tool JSON in the model context. File reads get a higher cap. */
 const MAX_TOOL_RESULT_CHARS = 3_500;
-const MAX_FILE_RESULT_CHARS = 14_000;
+const MAX_FILE_RESULT_CHARS = 16_000;
 const EXPLORE_TOOLS = new Set([
   'github.list_files',
   'github.list_tree',
@@ -156,6 +156,34 @@ function truncateForModel(value: unknown, max = MAX_TOOL_RESULT_CHARS): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** Tool results for the model — keep get_file as valid JSON with usable content. */
+function formatToolResultForModel(toolName: string, result: unknown): string {
+  if (toolName === 'github.get_file' && result && typeof result === 'object') {
+    const row = result as Record<string, any>;
+    if (typeof row.content === 'string') {
+      const overhead = JSON.stringify({
+        path: row.path,
+        type: row.type,
+        size: row.size,
+        sha: row.sha,
+        truncated: true,
+        content: '',
+      }).length;
+      const budget = Math.max(2_000, MAX_FILE_RESULT_CHARS - overhead);
+      const cut = row.content.length > budget;
+      return JSON.stringify({
+        path: row.path,
+        type: row.type ?? 'file',
+        size: row.size,
+        sha: row.sha ?? null,
+        truncated: Boolean(row.truncated) || cut,
+        content: cut ? row.content.slice(0, budget) : row.content,
+      });
+    }
+  }
+  return truncateForModel(result ?? {}, toolResultBudget(toolName));
+}
+
 /** Short notes for the model when forcing a final answer (not shown raw to users). */
 function summarizeToolEvents(events: ToolEvent[]): string {
   if (events.length === 0) return 'No tools ran.';
@@ -178,10 +206,10 @@ function highlightToolResult(toolName: string, result: unknown): string {
   if (!result || typeof result !== 'object') return '';
   const row = result as Record<string, any>;
 
-  // File reads must keep code text — path-only digests made the model think files were empty.
+  // Keep a short excerpt for the model digest — never dump whole files into user chat.
   if (toolName === 'github.get_file' && typeof row.content === 'string') {
-    const body = row.content.length > 6_000 ? `${row.content.slice(0, 6_000)}…` : row.content;
-    return `${row.path || 'file'} (size ${row.size ?? body.length}${row.truncated ? ', truncated' : ''}):\n${body}`;
+    const body = row.content.length > 1_200 ? `${row.content.slice(0, 1_200)}…` : row.content;
+    return `${row.path || 'file'} (${row.size ?? body.length} bytes): ${body.replace(/\s+/g, ' ').slice(0, 400)}`;
   }
   if (toolName === 'github.search_code' && Array.isArray(row.results)) {
     return row.results
@@ -334,13 +362,57 @@ function buildInitialMessages(
   return messages;
 }
 
-function toolChoiceFor(round: number, tools: BotToolSpec[], message: string): 'auto' | 'required' {
-  if (round > 0 || tools.length === 0) return 'auto';
+function toolChoiceFor(
+  round: number,
+  tools: BotToolSpec[],
+  message: string,
+  forceTools = false
+): 'auto' | 'required' {
+  if (tools.length === 0) return 'auto';
+  if (forceTools) return 'required';
+  if (round > 0) return 'auto';
   const text = message.trim().toLowerCase();
   if (/^(hi|hey|hello|thanks|thank you|ok|okay|yo|sup|good morning|good night)[!.?\s]*$/.test(text)) {
     return 'auto';
   }
   return 'required';
+}
+
+function turnHasAction(events: ToolEvent[]): boolean {
+  return events.some((event) => event.status === 'success' && ACT_TOOLS.has(event.toolName));
+}
+
+function turnHasReads(events: ToolEvent[]): boolean {
+  return events.some(
+    (event) =>
+      event.status === 'success' &&
+      (event.toolName === 'github.get_file' ||
+        event.toolName === 'github.search_code' ||
+        event.toolName === 'jira.get_ticket')
+  );
+}
+
+/** True when the user wants changes applied, not just an explanation of existing code/tickets. */
+function userAskedForChanges(message: string): boolean {
+  const text = message.toLowerCase();
+  if (
+    /\b(what does|what's in|whats in|show me|explain|summarize|summarise|describe|how does|where is|find|look at|read)\b/.test(
+      text
+    ) &&
+    !/\b(fix|implement|write|create|update|change|add|remove|delete|refactor|patch|ship|pr\b|pull request|commit|resolve|close|transition|assign)\b/.test(
+      text
+    )
+  ) {
+    return false;
+  }
+  return /\b(fix|implement|write|create|update|change|add|remove|delete|refactor|patch|ship|build|code|pr\b|pull request|commit|resolve|close|transition|assign|do the|finish|complete|handle)\b/.test(
+    text
+  );
+}
+
+/** Reads without a write/PR/Jira mutation — only force more work when the user asked for changes. */
+function needsActionAfterReads(events: ToolEvent[], message: string): boolean {
+  return userAskedForChanges(message) && turnHasReads(events) && !turnHasAction(events);
 }
 
 function toOpenAiTools(tools: BotToolSpec[]) {
@@ -453,6 +525,10 @@ export async function runBotTurn(params: {
   // Set when the tool loop should stop early and go straight to the final answer.
   let stopToolLoop = false;
   let exploreStreak = 0;
+  let forceToolsNext = false;
+  let emptyReplyRetries = 0;
+  let actionNudges = 0;
+  const wantsChanges = userAskedForChanges(params.messageContent);
 
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS && !stopToolLoop; round++) {
@@ -466,12 +542,17 @@ export async function runBotTurn(params: {
           model,
           messages,
           ...(tools.length > 0
-            ? { tools: toOpenAiTools(tools), tool_choice: toolChoiceFor(round, tools, params.messageContent) }
+            ? {
+                tools: toOpenAiTools(tools),
+                tool_choice: toolChoiceFor(round, tools, params.messageContent, forceToolsNext),
+              }
             : {}),
-          max_tokens: 1024,
+          // Tool argument payloads need headroom; 1024 often yields an empty message.
+          max_tokens: tools.length > 0 ? 4096 : 2048,
           temperature: tools.length > 0 ? 0.2 : 0.7,
         }),
       });
+      forceToolsNext = false;
 
       if (!res.ok) {
         let detail = '';
@@ -514,18 +595,28 @@ export async function runBotTurn(params: {
         );
       }
 
-      // Final answer (no tools to run)
+      // No structured tool calls this round.
       if (toolCalls.length === 0) {
         const text = stripEmbeddedToolMarkup(rawContent);
-        if (!text) {
-          const digest = summarizeToolEvents(collected);
-          if (digest && digest !== 'No tools ran.') {
-            return {
-              text: `I ran tools but the model returned an empty reply. Progress:\n${digest}`,
-              tools: collected,
-              tokenUsage: usage,
-              waitingForApproval: false,
-            };
+        const canContinue = tools.length > 0 && round < MAX_TOOL_ROUNDS - 1;
+        const needsMoreWork = needsActionAfterReads(collected, params.messageContent);
+
+        // Empty model output after tools: retry instead of dumping raw progress.
+        if (!text.trim()) {
+          if (canContinue && collected.length > 0 && emptyReplyRetries < 2) {
+            emptyReplyRetries += 1;
+            forceToolsNext = needsMoreWork || collected.length > 0;
+            messages.push({
+              role: 'system',
+              content: needsMoreWork
+                ? 'Your last message was empty. Continue with tools: create_branch / write_file / create_pull_request (or the Jira update tools) to finish the user request. Do not stop after only reading.'
+                : 'Your last message was empty. Call the next tool needed to finish the user request, or if the work is already done, write a short plain-language answer with no tool dumps.',
+            });
+            continue;
+          }
+          if (collected.length > 0) {
+            stopToolLoop = true;
+            break;
           }
           return {
             tools: collected,
@@ -534,6 +625,22 @@ export async function runBotTurn(params: {
             error: { kind: 'bad_response', message: 'Gateway returned no content.' },
           };
         }
+
+        // Model tried to answer after only reading — push it to finish the work.
+        if (canContinue && needsMoreWork && actionNudges < 3) {
+          actionNudges += 1;
+          messages.push({ role: 'assistant', content: text });
+          messages.push({
+            role: 'system',
+            content:
+              'That reply is premature. You have read context but have not applied changes yet. ' +
+              'Call tools now to finish (for code: create_branch, write_file, create_pull_request as needed). ' +
+              'Only after those tools succeed should you summarize for the user.',
+          });
+          forceToolsNext = true;
+          continue;
+        }
+
         return { text, tools: collected, tokenUsage: usage, waitingForApproval: false };
       }
 
@@ -643,7 +750,7 @@ export async function runBotTurn(params: {
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: `${truncateForModel(execution.result ?? {}, toolResultBudget(call.function.name))}\nIf this does not finish the user's request, call the next tool before you reply.`,
+          content: `${formatToolResultForModel(call.function.name, execution.result)}\nIf this does not finish the user's request, call the next tool before you reply.`,
         });
       }
 
@@ -665,6 +772,27 @@ export async function runBotTurn(params: {
             'Do not claim you cannot see code if get_file already returned content.',
         });
         exploreStreak = 0;
+        forceToolsNext = true;
+      }
+
+      // After reading code for a change request, push for write/branch/PR before chat.
+      if (
+        !stopToolLoop &&
+        wantsChanges &&
+        turnHasReads(collected) &&
+        !turnHasAction(collected) &&
+        actionNudges < 3 &&
+        round < MAX_TOOL_ROUNDS - 1
+      ) {
+        actionNudges += 1;
+        messages.push({
+          role: 'system',
+          content:
+            'You have file/ticket context. Next call tools that apply the change ' +
+            '(create_branch, write_file, delete_file, create_pull_request, or Jira update/comment/status). ' +
+            'Do not reply to the user until those tools have run or a tool error blocks you.',
+        });
+        forceToolsNext = true;
       }
     }
 
@@ -678,29 +806,43 @@ export async function runBotTurn(params: {
     // it can no longer defer by calling another tool. This is what stops a turn
     // from dying as "stopped after N tool rounds".
     // ---------------------------------------------------------------------
-    const toolDigest = summarizeToolEvents(collected);
-    // Keep recent file/ticket reads in the forced final so the model still has code context.
+    const toolDigest = summarizeToolEvents(collected)
+      .split('\n')
+      .map((line) => (line.length > 280 ? `${line.slice(0, 280)}…` : line))
+      .join('\n');
+    // Compact code excerpts only — full dumps make the final call return empty.
     const recentReads = collected
       .filter(
         (event) =>
           event.status === 'success' &&
           (event.toolName === 'github.get_file' || event.toolName === 'jira.get_ticket')
       )
-      .slice(-4)
-      .map((event) => highlightToolResult(event.toolName, event.result))
+      .slice(-3)
+      .map((event) => {
+        const row = event.result as Record<string, any> | undefined;
+        if (!row) return '';
+        if (event.toolName === 'github.get_file' && typeof row.content === 'string') {
+          const body = row.content.length > 2_500 ? `${row.content.slice(0, 2_500)}…` : row.content;
+          return `${row.path}:\n${body}`;
+        }
+        if (event.toolName === 'jira.get_ticket') {
+          return `${row.key || ''}: ${row.summary || ''} — ${String(row.description || '').slice(0, 800)}`;
+        }
+        return '';
+      })
       .filter(Boolean)
       .join('\n\n');
-    const slimHistory = messages.filter((m) => m.role === 'system' || m.role === 'user').slice(0, 6);
+    const slimHistory = messages.filter((m) => m.role === 'system' || m.role === 'user').slice(0, 4);
     const finalMessages: ChatMessage[] = [
       ...slimHistory,
       {
         role: 'system',
         content:
-          'You cannot call any more tools. Write a clear reply for the user from these outcomes. ' +
-          'No JSON dumps, no XML, no tool markup. Say what you did, what is left, and any blockers. ' +
-          'If file contents are included below, you have already read them — use them; do not ask the user to paste code.\n\n' +
+          'You cannot call any more tools. Write a clear short reply for the user. ' +
+          'No JSON, no XML, no code dumps, no "Progress:" lists. ' +
+          'Say what changed (or what blocked you) in plain language.\n\n' +
           `Outcomes:\n${toolDigest}` +
-          (recentReads ? `\n\nFile / ticket contents you already read:\n${recentReads}` : ''),
+          (recentReads ? `\n\nKey excerpts you already read:\n${recentReads}` : ''),
       },
       { role: 'user', content: params.messageContent },
     ];
@@ -714,7 +856,7 @@ export async function runBotTurn(params: {
       body: JSON.stringify({
         model,
         messages: finalMessages,
-        max_tokens: 1200,
+        max_tokens: 1500,
         temperature: 0.3,
       }),
     });
