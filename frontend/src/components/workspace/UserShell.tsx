@@ -1,11 +1,12 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../contexts/AppContext';
 import { GrokSidebar } from './GrokSidebar';
 import { GrokChatView } from '../chat/GrokChatView';
 import { CreateBotModal } from '../common/CreateBotModal';
 import { PluginsModal } from '../plugins/PluginsModal';
+import { BotPluginAccess } from './BotPluginAccess';
+import { TeamSlackCard } from './TeamSlackCard';
 import { BotBlobAvatar } from '../common/BotBlobAvatar';
-import { PluginLogo } from '../common/PluginLogo';
 import { api } from '../../services/api';
 import { Bot, AI_PROVIDERS } from '../../types';
 import {
@@ -40,7 +41,7 @@ const AVATAR_COLORS = [
 ];
 
 export const UserShell: React.FC = () => {
-  const { bots, theme } = useApp();
+  const { bots, theme, showToast } = useApp();
   const isDark = theme === 'dark';
 
   // Create Bot modal
@@ -55,6 +56,38 @@ export const UserShell: React.FC = () => {
 
   // Sidebar visibility collapse state
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const link = params.get('linkSlack');
+    const install = params.get('slackInstall');
+    const slackBot = params.get('slackBot');
+    if (!link && !install) return;
+
+    const linkToken = params.get('token');
+    const reason = params.get('slackReason');
+    window.history.replaceState({}, '', window.location.pathname);
+
+    if (link === '1') {
+      if (!linkToken) {
+        showToast('Open Link account from the bot’s message in Slack.', 'warning');
+        return;
+      }
+      void api
+        .linkSlackIdentity(linkToken)
+        .then((result) => showToast(result.displayName ? `Slack linked as ${result.displayName}` : 'Slack account linked', 'success'))
+        .catch((err) => showToast(err instanceof Error ? err.message : 'Could not link Slack', 'warning'));
+      return;
+    }
+    if (link === 'linked') showToast('Slack account linked', 'success');
+    if (link === 'noteam') showToast('Create a Team Bot first, then link Slack', 'warning');
+    if (link === 'error') showToast('Could not link Slack', 'warning');
+    if (slackBot) setSettingsBotId(slackBot);
+    if (install === 'connected') showToast('Slack app installed. Check your Slack DMs for a welcome message.', 'success');
+    if (install === 'awaiting_admin_approval') showToast('Awaiting admin approval in Slack', 'info');
+    if (install === 'pending_install') showToast('Slack install was not finished. Send the request from the bot settings.', 'warning');
+    if (install === 'error') showToast(reason || 'Slack install failed', 'warning');
+  }, [showToast]);
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -106,14 +139,21 @@ export const UserShell: React.FC = () => {
       {/* 3. Bot Settings â€” a real column beside the chat, not a layer on top of it */}
       {settingsBot && (
         <BotSettingsPanel
+          key={settingsBot.id}
           bot={settingsBot}
           onClose={() => setSettingsBotId(null)}
+          onOpenPlugins={(slug) => {
+            setPluginsOpenSlug(slug ?? null);
+            setIsPluginsOpen(true);
+          }}
         />
       )}
 
       {/* Create Bot Modal */}
-      <CreateBotModal isOpen={isCreateModalOpen} onClose={() => setIsCreateModalOpen(false)} />
-
+      <CreateBotModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+      />
       {/* Plugins dialog */}
       <PluginsModal
         isOpen={isPluginsOpen}
@@ -130,10 +170,11 @@ export const UserShell: React.FC = () => {
 interface BotSettingsPanelProps {
   bot: Bot;
   onClose: () => void;
+  onOpenPlugins: (slug?: string) => void;
 }
 
-const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => {
-  const { refreshData, showToast, theme, plugins, installedPlugins, navigate } = useApp();
+const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose, onOpenPlugins }) => {
+  const { refreshData, showToast, theme } = useApp();
   const isDark = theme === 'dark';
 
   // --- Bot details ---
@@ -143,13 +184,11 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
   const [avatar, setAvatar] = useState(bot.avatar);
   const [color, setColor] = useState(bot.color);
 
-  // --- Plugin tool access (this bot only) ---
-  const [botAccess, setBotAccess] = useState<Record<string, string[]>>({});
-
   // --- AI wiring (all per bot, nothing from .env) ---
   const [aiProvider, setAiProvider] = useState<Bot['aiProvider']>(bot.aiProvider);
   const [aiModel, setAiModel] = useState(bot.aiModel);
-  const [apiKey, setApiKey] = useState(bot.aiApiKey);
+  const [apiKey, setApiKey] = useState('');
+  const [removeSavedApiKey, setRemoveSavedApiKey] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [models, setModels] = useState<{ id: string; name?: string }[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -171,42 +210,13 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
     setColor(bot.color);
     setAiProvider(bot.aiProvider);
     setAiModel(bot.aiModel);
-    setApiKey(bot.aiApiKey);
+    setApiKey('');
+    setRemoveSavedApiKey(false);
     setModels([]);
     setSyncNote(null);
     setVerifyResult(null);
     setShowKey(false);
   }, [bot.id]);
-
-  // Plugin tool access for this bot, keyed by plugin slug.
-  // getBotPluginAccess already returns both the grant and the plugin's full tool
-  // list, so one call serves the panel.
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const access = await api.getBotPluginAccess(bot.id);
-        const map: Record<string, string[]> = {};
-        for (const entry of access) map[entry.pluginSlug] = entry.enabledTools;
-        setBotAccess(map);
-      } catch {
-        setBotAccess({});
-      }
-    };
-    load();
-  }, [bot.id, installedPlugins.length]);
-
-  const togglePluginTool = async (pluginSlug: string, toolName: string) => {
-    const current = botAccess[pluginSlug] || [];
-    const next = current.includes(toolName) ? current.filter((t) => t !== toolName) : [...current, toolName];
-
-    setBotAccess((prev) => ({ ...prev, [pluginSlug]: next }));
-    try {
-      await api.setBotPluginAccess(bot.id, pluginSlug, next);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update tool access', 'warning');
-      setBotAccess((prev) => ({ ...prev, [pluginSlug]: current }));
-    }
-  };
 
   // Saves the bot's editable details. The API key is only persisted when it
   // changes and has been verified.
@@ -227,9 +237,15 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
         aiProvider,
         aiEndpoint: endpoint,
         aiModel: aiModel.trim(),
-        aiApiKey: apiKey.trim(),
+        ...(removeSavedApiKey
+          ? { aiApiKey: null }
+          : apiKey.trim()
+            ? { aiApiKey: apiKey.trim() }
+            : {}),
       });
       await refreshData();
+      setApiKey('');
+      setRemoveSavedApiKey(false);
       showToast('Bot settings saved', 'success');
       setVerifyResult(null);
     } catch (err) {
@@ -262,7 +278,7 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
     setIsSyncing(true);
     setSyncNote(null);
     try {
-      const result = await api.listBotModels(aiProvider, apiKey);
+      const result = await api.listBotModels(aiProvider, apiKey, bot.id);
       if (result.ok) {
         setModels(result.models);
         setSyncNote(`Loaded ${result.models.length} model${result.models.length === 1 ? '' : 's'}.`);
@@ -421,83 +437,11 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
           </div>
         </div>
 
-        {/* ============ PLUGIN TOOLS ============ */}
-        <div className={sectionClasses}>Plugin tools</div>
-        <div className="px-3 space-y-3">
-          {installedPlugins.length === 0 ? (
-            <div
-              className={`rounded-xl border border-dashed p-3.5 text-[11px] ${
-                isDark ? 'border-[#2f3336] text-[#71767b]' : 'border-[#cfd9de] text-[#8b98a5]'
-              }`}
-            >
-              <p className="font-bold">No plugins connected</p>
-              <p className="mt-1 leading-relaxed">
-                Connect GitHub, Slack, Jira or Web Search in Plugins, then enable their tools here for this bot.
-              </p>
-              <button
-                type="button"
-                onClick={() => navigate('/plugins')}
-                className={`mt-2 rounded-full px-3 py-1.5 text-[11px] font-bold transition ${
-                  isDark ? 'bg-white text-black hover:bg-[#d7dbdc]' : 'bg-[#0f1419] text-white hover:bg-[#27313a]'
-                }`}
-              >
-                Open Plugins
-              </button>
-            </div>
-          ) : (
-            installedPlugins.map((installation) => {
-              const plugin = plugins.find((p) => p.slug === installation.pluginSlug);
-              if (!plugin) return null;
+        <div className={sectionClasses}>Slack</div>
+        <TeamSlackCard bot={bot} isDark={isDark} />
 
-              return (
-                <div
-                  key={installation.id}
-                  className={`rounded-xl border p-3 ${isDark ? 'border-[#2f3336] bg-[#181a1f]' : 'border-[#e5e7eb] bg-[#f8f9fa]'}`}
-                >
-                  <div className="mb-2 flex items-center space-x-2">
-                    <PluginLogo slug={plugin.slug} size={18} />
-                    <span className="text-[11px] font-extrabold">{plugin.name}</span>
-                    <span className="ml-auto rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-emerald-400">
-                      Connected
-                    </span>
-                  </div>
-
-                  <div className="space-y-1">
-                    {plugin.tools.map((tool) => {
-                      const enabled = (botAccess[plugin.slug] || []).includes(tool.name);
-                      return (
-                        <button
-                          key={tool.name}
-                          type="button"
-                          onClick={() => togglePluginTool(plugin.slug, tool.name)}
-                          className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left transition hover:bg-black/5 dark:hover:bg-white/5"
-                        >
-                          <div className="min-w-0">
-                            <p className="truncate font-mono text-[10px] font-bold">{tool.name}</p>
-                            <p className={`truncate text-[10px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                              {tool.description}
-                            </p>
-                          </div>
-                          <span
-                            className={`ml-2 flex h-4 w-8 shrink-0 items-center rounded-full transition ${
-                              enabled ? 'bg-emerald-500' : isDark ? 'bg-[#2f3336]' : 'bg-[#cfd9de]'
-                            }`}
-                          >
-                            <span
-                              className={`h-3 w-3 rounded-full bg-white transition-transform ${
-                                enabled ? 'translate-x-4' : 'translate-x-0.5'
-                              }`}
-                            />
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
+        <div className={sectionClasses}>Accounts</div>
+        <BotPluginAccess key={bot.id} bot={bot} isDark={isDark} onOpenPlugins={onOpenPlugins} />
 
         {/* ============ AI PROVIDER ============ */}
         <div className={sectionClasses}>AI provider</div>
@@ -557,6 +501,9 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
                   className={`${inputClasses} pl-9 cursor-pointer appearance-none disabled:cursor-not-allowed`}
                 >
                   <option value="">Select a model</option>
+                  {aiModel && !models.some((model) => model.id === aiModel) && (
+                    <option value={aiModel}>{aiModel} (saved)</option>
+                  )}
                   {models.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.id}
@@ -608,9 +555,10 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
                 value={apiKey}
                 onChange={(e) => {
                   setApiKey(e.target.value);
+                  setRemoveSavedApiKey(false);
                   setVerifyResult(null);
                 }}
-                placeholder="Paste your Kilo gateway API key"
+                placeholder={bot.aiApiKeyConfigured ? 'Saved key configured; enter a new key to replace' : 'Paste this bot’s Kilo Gateway API key'}
                 autoComplete="off"
                 spellCheck={false}
                 className={`${inputClasses} pl-9 pr-14 font-mono`}
@@ -625,6 +573,23 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose }) => 
                 {showKey ? 'HIDE' : 'SHOW'}
               </button>
             </div>
+            {bot.aiApiKeyConfigured && (
+              <div className="mt-1.5 flex items-center justify-between">
+                <p className={`text-[10px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                  This key is saved privately for {bot.name}.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRemoveSavedApiKey((removed) => !removed);
+                    setApiKey('');
+                  }}
+                  className={`text-[10px] font-semibold ${removeSavedApiKey ? 'text-rose-400' : 'text-purple-400'}`}
+                >
+                  {removeSavedApiKey ? 'Keep saved key' : 'Remove key'}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Verify */}

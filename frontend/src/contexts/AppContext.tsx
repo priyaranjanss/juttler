@@ -211,7 +211,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!currentUser) return;
 
     const existing = conversations.find(
-      (c) => !c.isGroup && c.participantBotIds.length === 1 && c.participantBotIds[0] === botId
+      (c) =>
+        !c.isGroup &&
+        (c.source ?? 'app') !== 'slack' &&
+        c.participantBotIds.length === 1 &&
+        c.participantBotIds[0] === botId
     );
 
     let conversation = existing;

@@ -6,6 +6,8 @@ import {
   PluginDefinition,
   PluginInstallation,
   ApprovalRequest,
+  SlackBotInstall,
+  TeamView,
 } from '../../types/index';
 
 const configuredBackendUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
@@ -85,7 +87,10 @@ export const api = {
     return request('/bots', jsonBody(botData));
   },
 
-  async updateBot(id: string, updates: Partial<Bot>): Promise<Bot> {
+  async updateBot(
+    id: string,
+    updates: Omit<Partial<Bot>, 'aiApiKey'> & { aiApiKey?: string | null }
+  ): Promise<Bot> {
     return request(`/bots/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(updates),
@@ -105,10 +110,13 @@ export const api = {
 
   async listBotModels(
     provider: string,
-    apiKey: string
+    apiKey: string,
+    botId: string
   ): Promise<{ ok: boolean; models: { id: string; name?: string }[]; message?: string; status?: number }> {
-    const url = `/bots/models?provider=${encodeURIComponent(provider)}&apiKey=${encodeURIComponent(apiKey)}`;
-    return request(url);
+    return request('/bots/models', {
+      method: 'POST',
+      body: JSON.stringify({ provider, apiKey, botId }),
+    });
   },
 
   // Conversations
@@ -156,6 +164,18 @@ export const api = {
 
   async disconnectPlugin(slug: string): Promise<{ success: boolean }> {
     return request(`/plugins/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+  },
+
+  /**
+   * Older clients call this after connect. It does not copy account access
+   * from one bot to another.
+   */
+  async syncPluginGrants(): Promise<{ synced: boolean; bots: number; plugins: number }> {
+    return request('/plugins/sync-grants', { method: 'POST' });
+  },
+
+  async listGithubRepos(): Promise<{ repos: Array<{ name: string; private: boolean }> }> {
+    return request('/plugins/github/repos');
   },
 
   async getBotPluginAccess(botId: string): Promise<Array<{ id: string; pluginSlug: string; enabledTools: string[] }>> {
@@ -249,5 +269,41 @@ export const api = {
     data: { status: 'approved' | 'rejected'; rejectionReason?: string }
   ): Promise<{ approval: ApprovalRequest; toolResult?: Message }> {
     return request(`/approvals/${encodeURIComponent(id)}/resolve`, jsonBody(data));
+  },
+
+  // Team Bot Slack — the bot's own Slack app, separate from the Slack plugin.
+  async getMyTeam(): Promise<{ team: TeamView | null }> {
+    return request('/teams/mine');
+  },
+
+  async inviteTeamMember(
+    teamId: string,
+    email: string
+  ): Promise<{ userId: string; name: string; email: string; role: string; slackLinked: boolean }> {
+    return request(`/teams/${encodeURIComponent(teamId)}/members`, jsonBody({ email }));
+  },
+
+  async getTeamBotSlack(botId: string): Promise<SlackBotInstall> {
+    return request(`/slack/team-bots/${encodeURIComponent(botId)}`);
+  },
+
+  async publishTeamBot(botId: string): Promise<Bot> {
+    return request(`/slack/team-bots/${encodeURIComponent(botId)}/publish`, jsonBody({}));
+  },
+
+  async connectTeamBotSlack(botId: string): Promise<{ authorizeUrl?: string; status: string }> {
+    return request(`/slack/team-bots/${encodeURIComponent(botId)}/connect`, jsonBody({}));
+  },
+
+  async linkSlackIdentity(token: string): Promise<{ linked: boolean; displayName: string | null }> {
+    return request('/slack/link/identity', jsonBody({ token }));
+  },
+
+  async startSlackLink(slackTeamId?: string): Promise<{ authorizeUrl: string }> {
+    return request('/slack/link/start', jsonBody({ slackTeamId }));
+  },
+
+  async linkSlackFromPlugin(): Promise<{ linked: boolean }> {
+    return request('/slack/link/from-plugin', jsonBody({}));
   },
 };

@@ -1,6 +1,6 @@
-﻿import { sql } from '../config/db';
+import { sql } from '../config/db';
 import { generateId } from '../utils/id';
-import { PLUGINS, isSensitiveTool } from '../config/pluginCatalog';
+import { PLUGINS, registry, resolveTool, canonicalToolId, listPluginTools } from '../plugins';
 import { ApprovalRequest } from '../types';
 import { encryptToken, decryptTokenSafe, tokenFingerprint } from '../services/tokenCrypto';
 
@@ -13,7 +13,6 @@ export interface PluginRow {
   slug: string;
   name: string;
   description: string;
-  logo: string;
   category: string;
   is_official: boolean;
   auth_type: string;
@@ -58,7 +57,6 @@ export interface PluginDefinition {
   slug: string;
   name: string;
   description: string;
-  logo: string;
   category: string;
   isOfficial: boolean;
   authType: string;
@@ -82,7 +80,6 @@ function mapDefinition(row: PluginRow): PluginDefinition {
     slug: row.slug,
     name: row.name,
     description: row.description,
-    logo: row.logo,
     category: row.category,
     isOfficial: row.is_official,
     authType: row.auth_type,
@@ -92,20 +89,19 @@ function mapDefinition(row: PluginRow): PluginDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// Catalog (account-wide, upserted from src/config/pluginCatalog.ts)
+// Catalog (account-wide, upserted from src/plugins/)
 // ---------------------------------------------------------------------------
 
 /** Seeds or refreshes the official catalog. Safe to run on every migration. */
 export async function syncPluginCatalog(): Promise<number> {
   for (const plugin of PLUGINS) {
     await sql`
-      insert into plugins (id, slug, name, description, logo, category, is_official, auth_type, tools, required_credentials)
+      insert into plugins (id, slug, name, description, category, is_official, auth_type, tools, required_credentials)
       values (
         ${generateId('plg_')},
         ${plugin.slug},
         ${plugin.name},
         ${plugin.description},
-        ${plugin.logo},
         ${plugin.category},
         ${plugin.isOfficial},
         ${plugin.authType},
@@ -115,7 +111,6 @@ export async function syncPluginCatalog(): Promise<number> {
       on conflict (slug) do update set
         name = excluded.name,
         description = excluded.description,
-        logo = excluded.logo,
         category = excluded.category,
         is_official = excluded.is_official,
         auth_type = excluded.auth_type,
@@ -360,7 +355,36 @@ export async function getPluginUsageStats(): Promise<
   }));
 }
 
+/**
+ * Stores a refreshed access token while preserving the rest of the credential
+ * (notably the refresh token, which must survive to be reusable).
+ *
+ * OAuth access tokens rotate roughly hourly, so this runs often. If a caller
+ * passes the full credential instead of a bare token, only its `token` field is
+ * used.
+ */
+export async function updateInstallationAccessToken(
+  id: string,
+  accessToken: string,
+  currentCredential?: Record<string, any>
+): Promise<void> {
+  const merged: Record<string, any> = {
+    ...(currentCredential ?? {}),
+    token: accessToken,
+  };
+
+  await sql`
+    update plugin_installations
+    set access_token = ${encryptToken(JSON.stringify(merged))},
+        updated_at = now()
+    where id = ${id}
+  `;
+}
+
 export async function deleteInstallation(id: string): Promise<boolean> {
+  // Drop bot grants first so a missing cascade cannot leave a disconnected
+  // account usable.
+  await sql`delete from bot_plugin_access where installation_id = ${id}`;
   const rows = await sql`delete from plugin_installations where id = ${id} returning id`;
   return rows.length > 0;
 }
@@ -387,7 +411,7 @@ export interface BotAccessView {
 /** Tools a bot may use, keyed by plugin slug. */
 export async function listBotAccess(botId: string): Promise<BotAccessView[]> {
   const rows = (await sql`
-    select a.id, a.enabled_tools, p.slug as plugin_slug
+    select a.id, a.installation_id, a.enabled_tools, p.slug as plugin_slug
     from bot_plugin_access a
     join plugin_installations i on i.id = a.installation_id
     join plugins p on p.id = i.plugin_id
@@ -421,12 +445,31 @@ export async function upsertBotAccess(
   return rows[0];
 }
 
-/** Enabling one plugin for a bot enables all of its non-sensitive tools by default. */
+/**
+ * Turns one plugin on for one bot.
+ *
+ * An existing row is that bot's own decision, including a switch left off
+ * (an empty tool list). It is never merged or copied onto another bot.
+ */
 export async function grantPluginToBot(botId: string, installationId: string, pluginId: string): Promise<BotAccessRow> {
+  const existing = await findBotAccess(botId, installationId);
+  if (existing) return existing;
+
   const plugin = await findPluginDefinitionById(pluginId);
-  const toolNames = (plugin?.tools ?? []).map((t: any) => t.name);
-  const defaults = toolNames.filter((name: string) => !isSensitiveTool(name));
-  return upsertBotAccess(botId, installationId, defaults);
+  const toolIds = listPluginTools(registry, plugin?.slug ?? '').map((t) => t.id);
+  return upsertBotAccess(botId, installationId, toolIds);
+}
+
+/**
+ * Reports how many bots and connected accounts this user has.
+ *
+ * It does not write grants. A connected account stays off for every bot until
+ * that bot's own switch is turned on.
+ */
+export async function syncAllBotGrants(userId: string): Promise<{ bots: number; plugins: number }> {
+  const installations = await listInstallations(userId);
+  const botRows = (await sql`select id from bots where user_id = ${userId}`) as unknown as Array<{ id: string }>;
+  return { bots: botRows.length, plugins: installations.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -533,28 +576,33 @@ export interface ToolPermission {
  * user whether to connect a plugin or flip a toggle.
  */
 export async function getToolPermission(userId: string, botId: string, toolName: string): Promise<ToolPermission> {
-  const sensitive = isSensitiveTool(toolName);
+  const record = resolveTool(registry, toolName);
+  const sensitive = record?.requiresApproval ?? false;
   const empty: ToolPermission = { installed: false, installedButNoAccess: false, enabled: false, sensitive };
 
   // Which plugin owns this tool?
-  const owner = PLUGINS.find((p) => p.tools.some((t) => t.name === toolName));
-  if (!owner) return empty;
+  if (!record) return empty;
+  const ownerSlug = record.pluginSlug;
 
-  const installation = await findInstallation(userId, owner.slug);
-  if (!installation) return empty;
+  const installation = await findInstallation(userId, ownerSlug);
+  if (!installation || installation.status !== 'connected') return empty;
 
   const access = await findBotAccess(botId, installation.id);
   if (!access) {
-    return { installed: true, installedButNoAccess: false, enabled: false, sensitive, pluginSlug: owner.slug };
+    return { installed: true, installedButNoAccess: false, enabled: false, sensitive, pluginSlug: ownerSlug };
   }
 
-  const enabled = (access.enabled_tools || []).includes(toolName);
+  const stored = (access.enabled_tools || []).map((name) => {
+    const resolved = resolveTool(registry, name);
+    return resolved ? resolved.id : name;
+  });
+  const enabled = stored.includes(record.id);
   return {
     installed: true,
     installedButNoAccess: !enabled,
     enabled,
     sensitive,
-    pluginSlug: owner.slug,
+    pluginSlug: ownerSlug,
   };
 }
 
@@ -577,28 +625,32 @@ export async function getInstallationCredential(installationId: string): Promise
 export async function listBotAvailableTools(
   userId: string,
   botId: string
-): Promise<Array<{ toolName: string; pluginSlug: string; sensitive: boolean; description: string }>> {
+): Promise<Array<{ toolId: string; toolName: string; pluginSlug: string; sensitive: boolean; description: string; parameters: any }>> {
   const installations = await listInstallations(userId);
   const access = await listBotAccess(botId);
 
-  const available: Array<{ toolName: string; pluginSlug: string; sensitive: boolean; description: string }> = [];
+  const available: Array<{ toolId: string; toolName: string; pluginSlug: string; sensitive: boolean; description: string; parameters: any }> = [];
 
   for (const installation of installations) {
+    if (installation.status !== 'connected') continue;
     const pluginDef = PLUGINS.find((p) => p.slug === installation.pluginSlug);
     if (!pluginDef) continue;
 
-    const grant = access.find((a) => a.installationId === installation.id);
+    const grant = access.find((row) => row.installationId === installation.id);
     if (!grant) continue;
 
-    for (const tool of pluginDef.tools) {
-      if ((grant.enabledTools || []).includes(tool.name)) {
-        available.push({
-          toolName: tool.name,
-          pluginSlug: pluginDef.slug,
-          sensitive: tool.sensitive,
-          description: tool.description,
-        });
-      }
+    // A non-empty grant means the plugin is on, so every current tool is available.
+    if ((grant.enabledTools || []).length === 0) continue;
+
+    for (const tool of listPluginTools(registry, installation.pluginSlug)) {
+      available.push({
+        toolId: tool.id,
+        toolName: tool.toolName,
+        pluginSlug: tool.pluginSlug,
+        sensitive: tool.requiresApproval,
+        description: tool.description,
+        parameters: tool.parameters,
+      });
     }
   }
 

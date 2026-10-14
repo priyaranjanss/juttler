@@ -1,4 +1,4 @@
-﻿import { Conversation, Message } from '../types';
+import { Conversation, Message } from '../types';
 import { sql } from '../config/db';
 import { generateId } from '../utils/id';
 
@@ -14,6 +14,7 @@ interface ConversationRow {
   participant_bot_ids: string[];
   last_message_snippet: string | null;
   last_message_at: Date | null;
+  source?: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -27,6 +28,7 @@ function mapConversation(row: ConversationRow): Conversation {
     participantBotIds: row.participant_bot_ids || [],
     lastMessageSnippet: row.last_message_snippet ?? undefined,
     lastMessageAt: row.last_message_at ? row.last_message_at.toISOString() : new Date().toISOString(),
+    source: row.source === 'slack' ? 'slack' : 'app',
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -54,10 +56,18 @@ export async function createConversation(data: {
   title: string;
   isGroup: boolean;
   participantBotIds: string[];
+  source?: 'app' | 'slack';
 }): Promise<Conversation> {
   const rows = (await sql`
-    insert into conversations (id, user_id, title, is_group, participant_bot_ids)
-    values (${generateId('conv_')}, ${data.userId}, ${data.title}, ${data.isGroup}, ${JSON.stringify(data.participantBotIds)}::jsonb)
+    insert into conversations (id, user_id, title, is_group, participant_bot_ids, source)
+    values (
+      ${generateId('conv_')},
+      ${data.userId},
+      ${data.title},
+      ${data.isGroup},
+      ${JSON.stringify(data.participantBotIds)}::jsonb,
+      ${data.source === 'slack' ? 'slack' : 'app'}
+    )
     returning *
   `) as unknown as ConversationRow[];
   return mapConversation(rows[0]);

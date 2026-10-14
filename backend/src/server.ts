@@ -1,30 +1,41 @@
-﻿import express from 'express';
+import express from 'express';
+import { asyncHandler } from './utils/asyncHandler';
 import { authenticate, isPublicAuthPath } from './middleware/auth';
 import { corsMiddleware } from './middleware/cors';
 import authRoutes from './routes/authRoutes';
 import botRoutes from './routes/botRoutes';
 import conversationRoutes from './routes/conversationRoutes';
 import pluginRoutes from './routes/pluginRoutes';
+import teamRoutes from './routes/teamRoutes';
+import slackTeamRoutes from './routes/slackTeamRoutes';
 import { syncPluginCatalog } from './repositories/plugins';
 
 const app = express();
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as express.Request).rawBody = buf;
+    },
+  })
+);
 app.use(corsMiddleware);
 
 // Auth guard: every /api route requires a valid session except public auth endpoints
-app.use('/api', (req, res, next) => {
+app.use('/api', asyncHandler(async (req, res, next) => {
   if (isPublicAuthPath(req.path)) {
     next();
     return;
   }
-  authenticate(req, res, next);
-});
+  await authenticate(req, res, next);
+}));
 
 // API routers
 app.use('/api/auth', authRoutes);
 app.use('/api/bots', botRoutes);
 app.use('/api', conversationRoutes);
 app.use('/api/plugins', pluginRoutes);
+app.use('/api/teams', teamRoutes);
+app.use('/api/slack', slackTeamRoutes);
 
 async function startServer() {
   // Railway (and most hosts) inject the port to bind. Fall back to 3000 locally.

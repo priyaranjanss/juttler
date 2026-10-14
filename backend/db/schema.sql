@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS bots (
   name               TEXT NOT NULL,
   role_title         TEXT NOT NULL,
   system_prompt      TEXT NOT NULL DEFAULT '',
-  avatar             TEXT NOT NULL DEFAULT 'ðŸ¤–',
+  avatar             TEXT NOT NULL DEFAULT 'Ã°Å¸Â¤â€“',
   color              TEXT NOT NULL DEFAULT '#6366f1',
   allowed_tools      JSONB NOT NULL DEFAULT '["web_search"]',
   is_chief_of_staff  BOOLEAN NOT NULL DEFAULT false,
@@ -180,7 +180,6 @@ CREATE TABLE IF NOT EXISTS plugins (
   slug        TEXT UNIQUE NOT NULL,
   name        TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
-  logo        TEXT NOT NULL DEFAULT '',
   category    TEXT NOT NULL DEFAULT 'Other',
   is_official BOOLEAN NOT NULL DEFAULT true,
   -- 'token' = paste an access token; 'oauth' = OAuth 2.0 redirect flow
@@ -196,6 +195,8 @@ CREATE INDEX IF NOT EXISTS idx_plugins_slug ON plugins(slug);
 
 -- Added after the first release: what each plugin asks the user for.
 ALTER TABLE plugins ADD COLUMN IF NOT EXISTS required_credentials JSONB NOT NULL DEFAULT '[]';
+-- Plugin marks are now drawn by the frontend from the slug, so this is unused.
+ALTER TABLE plugins DROP COLUMN IF EXISTS logo;
 
 -- One row per user per plugin. Tokens are encrypted at rest and never leave
 -- the backend (see services/tokenCrypto.ts).
@@ -208,7 +209,7 @@ CREATE TABLE IF NOT EXISTS plugin_installations (
   access_token     TEXT,
   refresh_token    TEXT,
   token_expires_at TIMESTAMPTZ,
-  -- Extra account info shown in the UI (e.g. GitHub login) â€” no secrets here
+  -- Extra account info shown in the UI (e.g. GitHub login) Ã¢â‚¬â€ no secrets here
   metadata         JSONB NOT NULL DEFAULT '{}',
   connected_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -231,3 +232,95 @@ CREATE INDEX IF NOT EXISTS idx_bot_plugin_access_bot ON bot_plugin_access(bot_id
 -- Code changes only affect the default for NEW bots, so existing rows need this.
 UPDATE bots SET role_title = 'Chief' WHERE role_title = 'Chief of Staff';
 UPDATE bots SET name        = 'Chief' WHERE name        = 'Chief of Staff';
+
+-- Slack threads are real conversations, but they must not replace the bot's
+-- main in-app chat. 'app' is the chat opened from the sidebar.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'app';
+
+-- A Team Bot belongs to one team. Personal bots stay team-less and keep using
+-- the Slack plugin (they post as the user). The dedicated Slack app is team-only.
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS team_id TEXT;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS is_team_bot BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS teams (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS team_members (
+  id              TEXT PRIMARY KEY,
+  team_id         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role            TEXT NOT NULL CHECK (role IN ('owner', 'manager', 'member')),
+  slack_user_id   TEXT,
+  slack_team_id   TEXT,
+  slack_display_name TEXT,
+  slack_linked_at TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT team_members_unique UNIQUE (team_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
+
+-- One Slack app per Team Bot. Secrets are encrypted the same way as plugin tokens.
+CREATE TABLE IF NOT EXISTS slack_bot_apps (
+  id                      TEXT PRIMARY KEY,
+  bot_id                  TEXT NOT NULL UNIQUE REFERENCES bots(id) ON DELETE CASCADE,
+  team_id                 TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+  slack_team_id           TEXT,
+  slack_team_name         TEXT,
+  slack_app_id            TEXT,
+  client_id               TEXT,
+  client_secret           TEXT,
+  signing_secret          TEXT,
+  bot_token               TEXT,
+  bot_user_id             TEXT,
+  installer_user_id       TEXT,
+  installer_slack_user_id TEXT,
+  status                  TEXT NOT NULL DEFAULT 'pending_install'
+    CHECK (status IN ('pending_install', 'awaiting_admin_approval', 'connected', 'error')),
+  status_detail           TEXT,
+  welcome_dm_sent         BOOLEAN NOT NULL DEFAULT false,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_slack_bot_apps_slack_app ON slack_bot_apps(slack_app_id);
+
+-- One row per Slack DM (thread_key '') or per channel thread.
+CREATE TABLE IF NOT EXISTS slack_threads (
+  id              TEXT PRIMARY KEY,
+  installation_id TEXT NOT NULL REFERENCES slack_bot_apps(id) ON DELETE CASCADE,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  channel_id      TEXT NOT NULL,
+  thread_key      TEXT NOT NULL DEFAULT '',
+  channel_type    TEXT NOT NULL,
+  activated       BOOLEAN NOT NULL DEFAULT false,
+  link_prompted   BOOLEAN NOT NULL DEFAULT false,
+  title           TEXT NOT NULL DEFAULT '',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS slack_threads_lookup
+  ON slack_threads (installation_id, channel_id, thread_key);
+
+-- Slack retries events and also emits both app_mention and message for one post.
+CREATE TABLE IF NOT EXISTS slack_event_receipts (
+  event_id    TEXT PRIMARY KEY,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS slack_message_receipts (
+  installation_id TEXT NOT NULL,
+  channel_id      TEXT NOT NULL,
+  message_ts      TEXT NOT NULL,
+  received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (installation_id, channel_id, message_ts)
+);
+
+-- A bot has no computer. These two fields are the only places it may work:
+-- one Jira project, and the GitHub repositories it may read and change.
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS jira_project TEXT;
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS github_repos JSONB NOT NULL DEFAULT '[]';
+ALTER TABLE team_members ADD COLUMN IF NOT EXISTS slack_display_name TEXT;

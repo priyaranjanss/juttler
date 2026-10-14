@@ -40,6 +40,37 @@ function getSecret(): string {
 // Token issuing & verification (stateless HS256 JWTs)
 // ---------------------------------------------------------------------------
 
+export function signSlackLink(slackUserId: string, slackTeamId: string, displayName: string): string {
+  return jwt.sign(
+    { purpose: 'slack-link', slackUserId, slackTeamId, displayName: displayName.slice(0, 80) },
+    getSecret(),
+    { expiresIn: '30m' }
+  );
+}
+
+export function verifySlackLink(token: string | undefined): {
+  slackUserId: string;
+  slackTeamId: string;
+  displayName: string;
+} | null {
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(token, getSecret());
+    if (typeof payload === 'string' || payload.purpose !== 'slack-link') return null;
+    const slackUserId = payload.slackUserId;
+    const slackTeamId = payload.slackTeamId;
+    const displayName = payload.displayName;
+    if (typeof slackUserId !== 'string' || typeof slackTeamId !== 'string') return null;
+    return {
+      slackUserId,
+      slackTeamId,
+      displayName: typeof displayName === 'string' ? displayName : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function signAuthToken(userId: string): string {
   return jwt.sign({ sub: userId }, getSecret(), { expiresIn: JWT_EXPIRES_IN });
 }

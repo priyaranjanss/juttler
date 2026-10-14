@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useApp } from '../../contexts/AppContext';
 import { api } from '../../services/api';
 import { BotBlobAvatar } from '../common/BotBlobAvatar';
@@ -40,6 +40,9 @@ export const PluginsModal: React.FC<PluginsModalProps> = ({ isOpen, onClose, ini
   /** 'list' = marketplace, 'admin' = platform-wide connections. */
   const [view, setView] = useState<'list' | 'admin'>('list');
   const [isLoadingCatalog, setIsLoadingCatalog] = useState(true);
+  /** Connected plugin awaiting inline disconnect confirmation, by slug. */
+  const [disconnectSlug, setDisconnectSlug] = useState<string | null>(null);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
 
   const loadCatalog = useCallback(async () => {
     try {
@@ -50,6 +53,24 @@ export const PluginsModal: React.FC<PluginsModalProps> = ({ isOpen, onClose, ini
       setIsLoadingCatalog(false);
     }
   }, [showToast]);
+
+  /**
+   * Disconnects a connected plugin from the list, inline-confirmed first so a
+   * stray click on a small target cannot drop a working credential.
+   */
+  const handleDisconnect = async (slug: string, name: string) => {
+    setIsDisconnecting(true);
+    try {
+      await api.disconnectPlugin(slug);
+      showToast(`${name} disconnected`, 'success');
+      setDisconnectSlug(null);
+      await Promise.all([loadCatalog(), refreshData()]);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Disconnect failed', 'warning');
+    } finally {
+      setIsDisconnecting(false);
+    }
+  };
 
   // Reset to the list each time the dialog opens, honouring a requested plugin
   useEffect(() => {
@@ -151,6 +172,95 @@ export const PluginsModal: React.FC<PluginsModalProps> = ({ isOpen, onClose, ini
 
             {/* ---------- Body ---------- */}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+              {/* Connected plugins come first: disconnect has to be reachable
+                  without scrolling past the whole marketplace. */}
+              {connectedList.length > 0 && (
+                <div>
+                  <p className={`px-1 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-[#536471]' : 'text-[#8b98a5]'}`}>
+                    Connected to your account ({connectedList.length})
+                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {connectedList.map((plugin) => {
+                      const installation = installedBySlug.get(plugin.slug);
+                      const isConfirming = disconnectSlug === plugin.slug;
+                      return (
+                        <div
+                          key={plugin.id}
+                          className={`rounded-xl border transition ${
+                            isDark ? 'border-[#2f3336] bg-[#181a1f]' : 'border-[#e5e7eb] bg-white'
+                          }`}
+                        >
+                          <div className="flex items-center space-x-3 p-2.5">
+                            {/* Main row opens the plugin detail */}
+                            <button
+                              onClick={() => setOpenSlug(plugin.slug)}
+                              className="flex min-w-0 flex-1 items-center space-x-3 rounded-lg text-left transition hover:opacity-80"
+                            >
+                              <PluginLogo slug={plugin.slug} size={20} />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-[11px] font-bold">{plugin.name}</p>
+                                <p className={`truncate text-[10px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                                  {plugin.tools.length} tools
+                                  {installation?.tokenHint ? ` Â· ${installation.tokenHint}` : ''}
+                                </p>
+                              </div>
+                            </button>
+
+                            <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
+
+                            {/* Labelled rather than icon-only, so it reads as an action */}
+                            <button
+                              onClick={() => setDisconnectSlug(plugin.slug)}
+                              disabled={isDisconnecting && isConfirming}
+                              className={`flex shrink-0 items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-bold transition disabled:opacity-50 ${
+                                isDark
+                                  ? 'border-red-500/30 text-red-400 hover:bg-red-500/10'
+                                  : 'border-red-200 text-red-600 hover:bg-red-50'
+                              }`}
+                            >
+                              <Unlink className="h-3 w-3" />
+                              <span>Disconnect</span>
+                            </button>
+                          </div>
+
+                          {/* Inline confirm — a second tap is required to actually drop it */}
+                          {isConfirming && (
+                            <div
+                              className={`flex items-center justify-between gap-2 border-t px-2.5 py-2 ${
+                                isDark ? 'border-[#2f3336]' : 'border-[#e5e7eb]'
+                              }`}
+                            >
+                              <p className={`text-[10px] font-bold ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                                Disconnect {plugin.name}? Bots lose access until you reconnect.
+                              </p>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <button
+                                  onClick={() => setDisconnectSlug(null)}
+                                  disabled={isDisconnecting}
+                                  className={`rounded-full px-2.5 py-1 text-[10px] font-bold transition disabled:opacity-50 ${
+                                    isDark ? 'hover:bg-[#202327]' : 'hover:bg-[#f0f2f5]'
+                                  }`}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => handleDisconnect(plugin.slug, plugin.name)}
+                                  disabled={isDisconnecting}
+                                  className="flex items-center gap-1 rounded-full bg-red-500 px-2.5 py-1 text-[10px] font-bold text-white transition hover:bg-red-600 disabled:opacity-50"
+                                >
+                                  {isDisconnecting && <Loader2 className="h-3 w-3 animate-spin" />}
+                                  <span>Disconnect</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {isLoadingCatalog ? (
                 <div className="flex items-center justify-center gap-2 py-16 text-[#71767b]">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -165,76 +275,79 @@ export const PluginsModal: React.FC<PluginsModalProps> = ({ isOpen, onClose, ini
                   {filtered.map((plugin) => {
                     const installation = installedBySlug.get(plugin.slug);
                     return (
-                      <button
+                      <div
                         key={plugin.id}
-                        onClick={() => setOpenSlug(plugin.slug)}
-                        className={`flex flex-col space-y-2.5 rounded-2xl border p-3.5 text-left transition ${
+                        className={`flex flex-col rounded-2xl border ${
                           isDark
                             ? 'border-[#2f3336] bg-[#181a1f] hover:border-[#536471]'
                             : 'border-[#e5e7eb] bg-[#f8f9fa] hover:border-[#cfd9de]'
                         }`}
                       >
-                        <div className="flex w-full items-start justify-between">
-                          <PluginLogo slug={plugin.slug} size={28} />
-                          {installation ? (
-                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-400">
-                              Connected
-                            </span>
-                          ) : (
-                            <span
-                              className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${
-                                isDark ? 'border-[#2f3336] bg-[#202327]' : 'border-[#e5e7eb] bg-white'
-                              }`}
-                            >
-                              Add
-                            </span>
-                          )}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-xs font-extrabold">{plugin.name}</p>
-                          <p className={`mt-0.5 text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                            {plugin.description}
-                          </p>
-                          <p className={`mt-1.5 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-[#536471]' : 'text-[#8b98a5]'}`}>
-                            {plugin.category} Â· {plugin.tools.length} tools
-                          </p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* Connected to your account */}
-              {connectedList.length > 0 && (
-                <div>
-                  <p className={`px-1 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-[#536471]' : 'text-[#8b98a5]'}`}>
-                    Connected to your account ({connectedList.length})
-                  </p>
-                  <div className="mt-2 space-y-1.5">
-                    {connectedList.map((plugin) => {
-                      const installation = installedBySlug.get(plugin.slug);
-                      return (
                         <button
-                          key={plugin.id}
                           onClick={() => setOpenSlug(plugin.slug)}
-                          className={`flex w-full items-center space-x-3 rounded-xl border p-2.5 text-left transition ${
-                            isDark ? 'border-[#2f3336] bg-[#181a1f] hover:bg-[#202327]' : 'border-[#e5e7eb] bg-white hover:bg-[#f7f9f9]'
-                          }`}
+                          className="flex flex-col space-y-2.5 rounded-2xl p-3.5 text-left transition"
                         >
-                          <PluginLogo slug={plugin.slug} size={20} />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-[11px] font-bold">{plugin.name}</p>
-                            <p className={`truncate text-[10px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                              {plugin.tools.length} tools
-                              {installation?.tokenHint ? ` Â· ${installation.tokenHint}` : ''}
+                          <div className="flex w-full items-start justify-between">
+                            <PluginLogo slug={plugin.slug} size={28} />
+                            {installation ? (
+                              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-400">
+                                Connected
+                              </span>
+                            ) : (
+                              <span
+                                className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${
+                                  isDark ? 'border-[#2f3336] bg-[#202327]' : 'border-[#e5e7eb] bg-white'
+                                }`}
+                              >
+                                Add
+                              </span>
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-extrabold">{plugin.name}</p>
+                            <p className={`mt-0.5 text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                              {plugin.description}
+                            </p>
+                            {plugin.slug === 'slack' && (
+                              <p className="mt-1 text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                                Each bot posts as itself
+                              </p>
+                            )}
+                            <p className={`mt-1.5 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-[#536471]' : 'text-[#8b98a5]'}`}>
+                              {plugin.category} Â· {plugin.tools.length} tools
                             </p>
                           </div>
-                          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
                         </button>
-                      );
-                    })}
-                  </div>
+
+                        {/* Disconnect lives on the card too, not just the detail view */}
+                        {installation && (
+                          <div
+                            className={`flex items-center justify-between border-t px-3.5 py-2 ${
+                              isDark ? 'border-[#2f3336]' : 'border-[#e5e7eb]'
+                            }`}
+                          >
+                            <button
+                              onClick={() => setOpenSlug(plugin.slug)}
+                              className={`text-[10px] font-bold transition ${isDark ? 'text-[#71767b] hover:text-white' : 'text-[#8b98a5] hover:text-black'}`}
+                            >
+                              Manage access
+                            </button>
+                            <button
+                              onClick={() => setDisconnectSlug(plugin.slug)}
+                              className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-bold transition ${
+                                isDark
+                                  ? 'border-red-500/30 text-red-400 hover:bg-red-500/10'
+                                  : 'border-red-200 text-red-600 hover:bg-red-50'
+                              }`}
+                            >
+                              <Unlink className="h-3 w-3" />
+                              <span>Disconnect</span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -397,6 +510,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
       showToast(`${plugin.name} disconnected`, 'success');
       setConfirmDisconnect(false);
       await refreshData();
+      onBack();
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Disconnect failed', 'warning');
     } finally {
@@ -428,7 +542,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
   }`;
 
   return (
-    <div className="flex max-h-[86vh] flex-col">
+    <div className="flex h-[80vh] max-h-full min-h-0 w-full flex-col overflow-hidden">
       {/* Header */}
       <div className={`flex items-center space-x-3 border-b px-5 py-4 ${isDark ? 'border-[#2f3336]' : 'border-[#e5e7eb]'}`}>
         <button
@@ -469,8 +583,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
         </button>
       </div>
 
-      {/* Body */}
-      <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+      <div className={`shrink-0 space-y-3 border-b px-5 py-4 ${isDark ? 'border-[#2f3336]' : 'border-[#e5e7eb]'}`}>
         <p className={`text-xs leading-relaxed ${isDark ? 'text-[#e7e9ea]' : 'text-[#0f1419]'}`}>{plugin.description}</p>
 
         {/* ---------- Connect ---------- */}
@@ -500,13 +613,22 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
         )}
 
         {plugin.authType === 'oauth' ? (
-          /* OAuth-only plugins (Gmail) have nothing to paste — run the flow */
+          /* OAuth-only plugins have nothing to paste — run the flow */
           <div className="space-y-2">
-            <p className={`text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-              {plugin.name} connects with your Google account. You'll approve access in Google, and the
-              credential is stored encrypted — it is never shown again.
-            </p>
-            {!installation && (
+            {plugin.slug === 'slack' ? (
+              <p className={`text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                Slack is connected on the bot, not as a shared login. Open the bot’s settings and choose Connect to
+                Slack. It posts as that bot. A direct message is always answered. A channel answers only when the bot
+                is @mentioned, then it follows that thread.
+              </p>
+            ) : (
+              <p className={`text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                {plugin.name} connects with your {plugin.slug === 'github' ? 'GitHub' : 'Google'} account.
+                You'll approve access there, and the credential is stored encrypted — it is never shown again.
+              </p>
+            )}
+
+            {plugin.slug !== 'slack' && !installation && (
               <button
                 onClick={handleOauthConnect}
                 disabled={isOauthStarting}
@@ -519,7 +641,11 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
                 ) : (
                   <ShieldCheck className="h-3.5 w-3.5" />
                 )}
-                <span>{isOauthStarting ? 'Opening Google...' : `Connect ${plugin.name}`}</span>
+                <span>
+                  {isOauthStarting
+                    ? `Opening ${plugin.name}...`
+                    : `Connect ${plugin.name}`}
+                </span>
               </button>
             )}
           </div>
@@ -613,7 +739,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
             ))}
         </div>
 
-        {/* ---------- Tools + per-bot toggles ---------- */}
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
         <div>
           <label className={labelClasses}>Tools ({plugin.tools.length})</label>
           <div
@@ -621,11 +747,15 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
               isDark ? 'divide-[#2f3336] border-[#2f3336] bg-[#181a1f]' : 'divide-[#e5e7eb] border-[#e5e7eb] bg-white'
             }`}
           >
-            {plugin.tools.map((tool) => (
-              <div key={tool.name} className="p-3">
+            {plugin.tools.map((tool) => {
+              // The canonical registry id, e.g. "slack.list_channels", is what
+              // grants are stored under and what the Tool Gateway resolves.
+              const toolId = `${plugin.slug}.${tool.name}`;
+              return (
+              <div key={toolId} className="p-3">
                 <div className="flex items-start space-x-2">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate font-mono text-[11px] font-bold">{tool.name}</p>
+                    <p className="truncate font-mono text-[11px] font-bold">{toolId}</p>
                     <p className={`text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
                       {tool.description}
                     </p>
@@ -640,11 +770,11 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
                 {installation && botList.length > 0 && (
                   <div className={`mt-2 space-y-1 border-t pt-2 ${isDark ? 'border-[#2f3336]/50' : 'border-[#e5e7eb]'}`}>
                     {botList.map((bot) => {
-                      const enabled = (botAccess[bot.id] || []).includes(tool.name);
+                      const enabled = (botAccess[bot.id] || []).includes(toolId);
                       return (
                         <button
                           key={bot.id}
-                          onClick={() => toggleToolForBot(bot.id, tool.name)}
+                          onClick={() => toggleToolForBot(bot.id, toolId)}
                           className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left transition hover:bg-black/5 dark:hover:bg-white/5"
                         >
                           <div className="flex items-center space-x-2 min-w-0">
@@ -668,7 +798,8 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
 
           <p className={`mt-2 text-[11px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
@@ -678,6 +809,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
           </p>
         </div>
       </div>
+    </div>
   );
 };
 

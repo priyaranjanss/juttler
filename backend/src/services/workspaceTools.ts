@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Workspace tools â€” the actions a user can take that the Chief of Staff can
  * take on their behalf.
  *
@@ -30,9 +30,9 @@ import {
   deleteInstallation,
   listBotAccess,
   upsertBotAccess,
-  grantPluginToBot,
 } from '../repositories/plugins';
 import { isChiefOfStaffBot } from '../config/chiefOfStaff';
+import { registry, resolveTool, listAllTools } from '../plugins';
 
 export interface WorkspaceToolSpec {
   name: string;
@@ -174,13 +174,14 @@ export async function describeRoster(userId: string): Promise<{
   bots: Array<{ name: string; roleTitle: string; isChief: boolean; purpose: string; tools: string[] }>;
 }> {
   const roster = await listBotsForUser(userId);
+  // Fetch definitions once rather than per bot inside the loop.
+  const definitions = await listPluginDefinitions();
   const out: Array<{ name: string; roleTitle: string; isChief: boolean; purpose: string; tools: string[] }> = [];
 
   for (const bot of roster) {
     const access = await listBotAccess(bot.id);
     const tools: string[] = [];
     for (const entry of access) {
-      const definitions = await listPluginDefinitions();
       const def = definitions.find((d) => d.slug === entry.pluginSlug);
       for (const enabled of entry.enabledTools) {
         tools.push(def ? `${entry.pluginSlug}.${enabled}` : enabled);
@@ -268,7 +269,7 @@ export async function executeWorkspaceTool(
           created: true,
           bot: { name: created.name, roleTitle: created.roleTitle, id: created.id },
           tools: wantedTools,
-          note: 'The Bot has no AI provider key yet. Ask the user to set its API key and model in bot settings before it can answer.',
+          note: 'The Bot has its own AI settings. Set its API key and model in bot settings before it can answer; its connected tools are configured separately.',
         },
       };
     }
@@ -327,21 +328,33 @@ export async function executeWorkspaceTool(
       }
 
       const definition = await findPluginDefinitionBySlug(slug);
-      const known = new Set((definition?.tools ?? []).map((t: any) => t.name));
-      const wanted = parseList(args.tools);
-      const invalid = wanted.filter((t) => !known.has(t));
-      if (invalid.length > 0) {
-        return { ok: false, result: { error: `Not tools of ${slug}: ${invalid.join(', ')}` } };
+      const validIds = listAllTools(registry)
+        .filter((t) => t.pluginSlug === slug)
+        .map((t) => t.id);
+
+      const canonical: string[] = [];
+      const rejected: string[] = [];
+      for (const entry of parseList(args.tools)) {
+        const record = resolveTool(registry, entry);
+        if (!record || record.pluginSlug !== slug) {
+          rejected.push(entry);
+          continue;
+        }
+        if (!canonical.includes(record.id)) canonical.push(record.id);
       }
 
-      await upsertBotAccess(target.id, installation.id, wanted);
+      if (rejected.length > 0) {
+        return { ok: false, result: { error: `Not tools of ${slug}: ${rejected.join(', ')}. Valid tools: ${validIds.join(', ')}` } };
+      }
+
+      await upsertBotAccess(target.id, installation.id, canonical);
       return {
         ok: true,
         result: {
           updated: true,
           bot: target.name,
           plugin: slug,
-          enabledTools: wanted,
+          enabledTools: canonical,
         },
       };
     }
@@ -424,18 +437,13 @@ export async function executeWorkspaceTool(
         metadata: slug === 'jira' ? { site: String(credential.site || '') } : {},
       });
 
-      // Account-wide: give the new capability to the user's bots (safe tools on)
-      for (const bot of await listBotsForUser(ctx.userId)) {
-        await grantPluginToBot(bot.id, installation.id, definition.id);
-      }
-
       return {
         ok: true,
         result: {
           connected: true,
           plugin: definition.name,
           toolCount: definition.tools.length,
-          note: 'Sensitive tools stay off until the user enables them per Bot.',
+          note: 'The account is connected. Each bot stays off until its own switch is turned on.',
         },
       };
     }
@@ -454,26 +462,32 @@ export async function executeWorkspaceTool(
   }
 }
 
-/** Enables the named tools on a freshly created bot where they exist. */
+/**
+ * Enables the named tools on a freshly created bot where they exist.
+ * Names are resolved through the registry, so any spelling the Chief uses
+ * (canonical, legacy or bare) grants the same tool.
+ */
 async function grantToolsForNewBot(userId: string, botId: string, toolNames: string[]): Promise<void> {
   for (const toolName of toolNames) {
-    const installation = await installationForTool(userId, toolName);
+    const record = resolveTool(registry, toolName);
+    if (!record) continue;
+
+    const installation = await findInstallationByUserAndPlugin(userId, record.pluginSlug);
     if (!installation) continue;
 
     const current = await listBotAccess(botId);
     const existing = current.find((a) => a.installationId === installation.id);
     const merged = new Set(existing?.enabledTools ?? []);
-    merged.add(toolName);
+    merged.add(record.id);
     await upsertBotAccess(botId, installation.id, [...merged]);
   }
 }
 
 async function installationForTool(userId: string, toolName: string) {
-  const installations = await listInstallations(userId);
-  const definitions = await listPluginDefinitions();
-  const owner = definitions.find((d) => (d.tools ?? []).some((t: any) => t.name === toolName));
-  if (!owner) return null;
-  return installations.find((i) => i.pluginSlug === owner.slug) || null;
+  const record = resolveTool(registry, toolName);
+  if (!record) return null;
+  const installation = await findInstallationByUserAndPlugin(userId, record.pluginSlug);
+  return installation || null;
 }
 
 export { findBotById };

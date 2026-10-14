@@ -41,7 +41,17 @@ export interface Bot {
   aiProvider: AiProvider;
   aiEndpoint: string;
   aiModel: string;
+  /** The API response reports whether a key is saved, never the key itself. */
+  aiApiKeyConfigured?: boolean;
   aiApiKey: string;
+  /** Team Bots can be published and given their own Slack app. Personal bots cannot. */
+  isTeamBot: boolean;
+  teamId: string | null;
+  publishedAt: string | null;
+  /** The only Jira project this bot may touch. Null until set in Work. */
+  jiraProject: string | null;
+  /** The only GitHub repositories this bot may read or change. */
+  githubRepos: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -99,6 +109,8 @@ export interface Conversation {
   participantBotIds: string[];
   lastMessageSnippet?: string;
   lastMessageAt: string;
+  /** 'slack' threads must not replace the bot's main in-app chat. */
+  source?: 'app' | 'slack';
   createdAt: string;
   updatedAt: string;
 }

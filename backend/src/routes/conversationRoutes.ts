@@ -2,7 +2,7 @@
 import { asyncHandler } from '../utils/asyncHandler';
 import { User, Bot, Message } from '../types';
 import { findUserById } from '../repositories/users';
-import { listBotsForUser, findBotById } from '../repositories/bots';
+import { listBotsForUser, findBotById, toPublicBot } from '../repositories/bots';
 import {
   listAllConversations,
   listConversationsForUser,
@@ -25,44 +25,89 @@ const HISTORY_LIMIT = 20;
 const router = Router();
 
 router.get('/conversations', asyncHandler(async (req: Request, res: Response) => {
-  const userId = req.query.userId as string;
+  const userId = req.user!.id;
   const isAdmin = req.query.isAdmin === 'true';
 
-  if (isAdmin) {
+  if (isAdmin && req.user!.role === 'admin') {
     return res.json(await listAllConversations());
-  }
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' });
   }
   res.json(await listConversationsForUser(userId));
 }));
 
 router.post('/conversations', asyncHandler(async (req: Request, res: Response) => {
   const { userId, title, isGroup, participantBotIds } = req.body;
-  if (!userId || !title) {
-    return res.status(400).json({ error: 'userId and title required' });
+  if (!title) {
+    return res.status(400).json({ error: 'title is required' });
   }
-  res.json(await createConversation({ userId, title, isGroup: !!isGroup, participantBotIds: participantBotIds || [] }));
+  if (userId && userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Cannot create a conversation for another user' });
+  }
+  const ownerId = req.user!.id;
+  const requestedBotIds = Array.isArray(participantBotIds) ? participantBotIds : [];
+  const ownedBots = await listBotsForUser(ownerId);
+  if (requestedBotIds.some((botId: string) => !ownedBots.some((bot) => bot.id === botId))) {
+    return res.status(400).json({ error: 'Every conversation bot must belong to the current user' });
+  }
+  res.json(await createConversation({ userId: ownerId, title, isGroup: !!isGroup, participantBotIds: requestedBotIds }));
 }));
 
 router.get('/conversations/:id/messages', asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const conversation = await findConversationById(id);
+  if (!conversation || conversation.userId !== req.user!.id) {
+    return res.status(404).json({ error: 'Conversation not found' });
+  }
   res.json(await listMessages(id));
 }));
 
 router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
-  const { conversationId, userId, messageContent, targetBotId } = req.body;
+  const { conversationId, userId: requestedUserId, messageContent, targetBotId } = req.body;
+  const userId = req.user!.id;
 
-  if (!conversationId || !userId || !messageContent) {
+  if (!conversationId || !messageContent) {
     return res.status(400).json({ error: 'Missing required parameters' });
+  }
+  if (requestedUserId && requestedUserId !== userId) {
+    return res.status(403).json({ error: 'Cannot chat as another user' });
   }
 
   const conv = await findConversationById(conversationId);
-  if (!conv) {
+  if (!conv || conv.userId !== userId) {
     return res.status(404).json({ error: 'Conversation not found' });
   }
 
   const user: User | null = await findUserById(userId);
+
+  let activeBot: Bot | null = null;
+  if (targetBotId) {
+    if (!conv.participantBotIds.includes(targetBotId)) {
+      return res.status(400).json({ error: 'The selected bot is not part of this conversation' });
+    }
+    activeBot = await findBotById(targetBotId);
+    if (!activeBot || activeBot.userId !== userId) {
+      return res.status(404).json({ error: 'Conversation bot not found' });
+    }
+  } else if (conv.participantBotIds.length > 0) {
+    const participants = await Promise.all(conv.participantBotIds.map((id) => findBotById(id)));
+    if (participants.some((bot) => !bot || bot.userId !== userId)) {
+      return res.status(400).json({ error: 'Conversation contains a bot that is not available to this user' });
+    }
+    const validParticipants = participants.filter((bot): bot is Bot => bot !== null);
+    activeBot =
+      validParticipants.find((bot) => messageContent.toLowerCase().includes(`@${bot.name.toLowerCase()}`)) ||
+      validParticipants[0] ||
+      null;
+  } else {
+    activeBot = (await listBotsForUser(userId)).find((bot) => bot.isChiefOfStaff) || null;
+  }
+
+  if (!activeBot) {
+    return res.status(400).json({ error: 'No bot is assigned to this conversation' });
+  }
+
+  // Only prior turns belong in model history; the current user message is sent
+  // separately to avoid replaying it twice.
+  const history = (await listMessages(conversationId)).slice(-HISTORY_LIMIT);
 
   const userMsg: Message = {
     id: generateId('msg_'),
@@ -77,47 +122,7 @@ router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
   await createMessage(userMsg);
   await touchConversation(conversationId, messageContent);
 
-  // Everything before this turn, for context.
-  const history = (await listMessages(conversationId)).slice(-HISTORY_LIMIT);
-
-  let activeBot: Bot | null = null;
-  if (targetBotId) {
-    activeBot = await findBotById(targetBotId);
-  } else if (conv.participantBotIds.length > 0) {
-    for (const bId of conv.participantBotIds) {
-      const b = await findBotById(bId);
-      if (b && messageContent.toLowerCase().includes(`@${b.name.toLowerCase()}`)) {
-        activeBot = b;
-        break;
-      }
-    }
-    if (!activeBot) {
-      activeBot = await findBotById(conv.participantBotIds[0]);
-    }
-  }
-
-  if (!activeBot) {
-    const userBots = await listBotsForUser(userId);
-    activeBot = userBots.find((b) => b.isChiefOfStaff) || null;
-  }
-
   const returnedMessages: Message[] = [userMsg];
-
-  if (!activeBot) {
-    const fallbackMsg: Message = {
-      id: generateId('msg_'),
-      conversationId,
-      senderType: 'system',
-      senderId: 'sys',
-      senderName: 'System',
-      content: 'No bot is assigned to this conversation. Please assign a bot to continue.',
-      type: 'system',
-      timestamp: new Date().toISOString(),
-    };
-    await createMessage(fallbackMsg);
-    returnedMessages.push(fallbackMsg);
-    return res.json({ messages: returnedMessages, activeBot: null });
-  }
 
   // Run the turn: plugins, approval gates, and (for the Chief) delegation to
   // specialist bots as sub-agents.
@@ -216,26 +221,27 @@ router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
 
   // Waiting on a human: the turn ends here, the approval card is the answer
   if (turn.waitingForApproval) {
-    return res.json({ messages: returnedMessages, activeBot, requiresApproval: true });
+    return res.json({ messages: returnedMessages, activeBot: toPublicBot(activeBot), requiresApproval: true });
   }
 
   if (turn.error || !turn.text) {
-    const needsKey = turn.error?.kind === 'not_configured';
+    // The turn already produced a precise message (which bot, and whether it is
+    // the key or the model that is missing), so pass it through rather than
+    // guessing with a generic "no API key" that sends the user to the wrong
+    // setting.
     const errorMsg: Message = {
       id: generateId('msg_'),
       conversationId,
       senderType: 'system',
       senderId: 'sys',
       senderName: 'System',
-      content: needsKey
-        ? 'This bot has no API key yet. Open bot settings, add the bot API key, and press Verify.'
-        : `Couldn't get a reply from ${activeBot.name}: ${turn.error?.message || 'empty response.'}`,
+      content: turn.error?.message || `Couldn't get a reply from ${activeBot.name}: empty response.`,
       type: 'system',
       timestamp: new Date().toISOString(),
     };
     await createMessage(errorMsg);
     returnedMessages.push(errorMsg);
-    return res.json({ messages: returnedMessages, activeBot, requiresApproval: false });
+    return res.json({ messages: returnedMessages, activeBot: toPublicBot(activeBot), requiresApproval: false });
   }
 
   const botMsg: Message = {
@@ -265,7 +271,7 @@ router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
   returnedMessages.push(botMsg);
   await touchConversation(conversationId, turn.text.slice(0, 60));
 
-  res.json({ messages: returnedMessages, activeBot });
+  res.json({ messages: returnedMessages, activeBot: toPublicBot(activeBot) });
 }));
 
 /**
@@ -328,10 +334,12 @@ router.post('/conversations/:id/run-tool', asyncHandler(async (req: Request, res
   if (!toolName) return res.status(400).json({ error: 'toolName is required' });
 
   const conv = await findConversationById(id);
-  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!conv || conv.userId !== req.user!.id) return res.status(404).json({ error: 'Conversation not found' });
 
   const bot = conv.participantBotIds.length > 0 ? await findBotById(conv.participantBotIds[0]) : null;
-  if (!bot) return res.status(400).json({ error: 'This conversation has no bot' });
+  if (!bot || bot.userId !== conv.userId) {
+    return res.status(400).json({ error: 'This conversation has no available bot' });
+  }
 
   const outcome = await callTool({
     userId: conv.userId,

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useApp } from '../../contexts/AppContext';
 import { api } from '../../services/api';
 import { BotBlobAvatar } from './BotBlobAvatar';
@@ -9,13 +9,50 @@ interface CreateBotModalProps {
   onClose: () => void;
 }
 
+/** A tool shown in the picker, built from the plugin catalog. */
+interface PickableTool {
+  /** Canonical registry id, e.g. "slack.list_channels". */
+  id: string;
+  name: string;
+  desc: string;
+  pluginSlug: string;
+  pluginName: string;
+  /** False when the plugin is not connected yet, so it cannot be used. */
+  connected: boolean;
+  /** Sensitive tools need human approval before they run. */
+  needsApproval: boolean;
+}
+
 export const CreateBotModal: React.FC<CreateBotModalProps> = ({
   isOpen,
   onClose,
 }) => {
-  const { currentUser, refreshData, showToast, openChatWithBot, theme } = useApp();
+  const { currentUser, refreshData, showToast, openChatWithBot, theme, plugins, installedPlugins } = useApp();
 
   const isDark = theme === 'dark';
+
+  // The tool list is discovered from the plugin catalog rather than written
+  // out here, so a new plugin (or a renamed tool) needs no change in this file.
+  const availableTools = useMemo<PickableTool[]>(() => {
+    const connected = new Set(installedPlugins.map((i) => i.pluginSlug));
+    const out: PickableTool[] = [];
+
+    for (const plugin of plugins) {
+      for (const tool of plugin.tools) {
+        out.push({
+          id: `${plugin.slug}.${tool.name}`,
+          name: tool.name.replace(/_/g, ' '),
+          desc: tool.description,
+          pluginSlug: plugin.slug,
+          pluginName: plugin.name,
+          connected: connected.has(plugin.slug),
+          needsApproval: tool.sensitive === true,
+        });
+      }
+    }
+
+    return out;
+  }, [plugins, installedPlugins]);
 
   // Bot creation state
   const [name, setName] = useState('');
@@ -23,11 +60,13 @@ export const CreateBotModal: React.FC<CreateBotModalProps> = ({
   const [systemPrompt, setSystemPrompt] = useState('');
   const [shape, setShape] = useState('blob');
   const [color, setColor] = useState('#7C3AED');
-  const [selectedTools, setSelectedTools] = useState<string[]>([
-    'web_search',
-    'github_list_prs',
-    'slack_send_message',
-  ]);
+
+  // Start with the safe defaults: every usable tool from a connected plugin
+  // that does not need approval. Nothing is pre-ticked for a plugin the user
+  // has not connected.
+  const [selectedTools, setSelectedTools] = useState<string[]>(() =>
+    availableTools.filter((t) => t.connected && !t.needsApproval).map((t) => t.id)
+  );
   const [isChiefOfStaff, setIsChiefOfStaff] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -55,15 +94,6 @@ export const CreateBotModal: React.FC<CreateBotModalProps> = ({
     '#FB7185', // Coral Red
     '#EC4899', // Pink
     '#6366F1', // Indigo
-  ];
-
-  const availableTools = [
-    { id: 'web_search', name: 'Web Search', desc: 'Google search & web browsing' },
-    { id: 'github_list_prs', name: 'GitHub PR Reader', desc: 'Inspect pull requests & commits' },
-    { id: 'github_merge_pr', name: 'GitHub PR Merger', desc: 'Merge code (requires approval)' },
-    { id: 'jira_search_tickets', name: 'Jira Ticket Reader', desc: 'Search backlog & sprint issues' },
-    { id: 'slack_send_message', name: 'Slack Publisher', desc: 'Post announcements (requires approval)' },
-    { id: 'code_interpreter', name: 'Code Sandbox', desc: 'Run JavaScript / Python snippet' },
   ];
 
   const toggleTool = (toolId: string) => {
@@ -94,7 +124,7 @@ export const CreateBotModal: React.FC<CreateBotModalProps> = ({
         isChiefOfStaff,
       });
 
-      showToast(`Created teammate: ${created.name}!`, 'success');
+      showToast(`Created ${created.name}`, 'success');
       await refreshData();
       onClose();
       // Reset form
@@ -232,33 +262,54 @@ export const CreateBotModal: React.FC<CreateBotModalProps> = ({
               />
             </div>
 
-            {/* Allowed Tools */}
+            {/* Allowed Tools & Capabilities */}
             <div>
               <label className="text-xs font-bold block mb-1.5">Allowed Tools & Capabilities</label>
-              <div className="grid grid-cols-2 gap-2">
-                {availableTools.map((tool) => (
-                  <button
-                    key={tool.id}
-                    type="button"
-                    onClick={() => toggleTool(tool.id)}
-                    className={`p-2.5 rounded-xl border text-left transition ${
-                      selectedTools.includes(tool.id)
-                        ? isDark
-                          ? 'border-emerald-500 bg-emerald-500/10 text-white'
-                          : 'border-emerald-600 bg-emerald-50 text-black'
-                        : isDark
-                        ? 'border-[#2f3336] bg-[#16181c] text-[#71767b]'
-                        : 'border-[#eff3f4] bg-[#f7f9f9] text-[#536471]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-0.5">
-                      <span className="text-xs font-bold">{tool.name}</span>
-                      {selectedTools.includes(tool.id) && <Check className="h-3.5 w-3.5 text-emerald-400" />}
-                    </div>
-                    <p className="text-[10px] opacity-75">{tool.desc}</p>
-                  </button>
-                ))}
-              </div>
+              {availableTools.length === 0 ? (
+                <p className={`text-[11px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+                  No tools are available yet. Connect a plugin in the Plugins panel first.
+                </p>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  {availableTools.map((tool) => (
+                    <button
+                      key={tool.id}
+                      type="button"
+                      onClick={() => toggleTool(tool.id)}
+                      disabled={!tool.connected}
+                      title={tool.connected ? tool.id : `${tool.pluginName} is not connected`}
+                      className={`p-2.5 rounded-xl border text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                        selectedTools.includes(tool.id)
+                          ? isDark
+                            ? 'border-emerald-500 bg-emerald-500/10 text-white'
+                            : 'border-emerald-600 bg-emerald-50 text-black'
+                          : isDark
+                          ? 'border-[#2f3336] bg-[#16181c] text-[#71767b]'
+                          : 'border-[#eff3f4] bg-[#f7f9f9] text-[#536471]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className="text-xs font-bold flex items-center gap-1">
+                          {tool.name}
+                          {tool.needsApproval && (
+                            <span
+                              className={`rounded-full px-1.5 py-px text-[8px] font-bold uppercase tracking-wider ${
+                                isDark ? 'bg-amber-500/15 text-amber-300' : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              approval
+                            </span>
+                          )}
+                        </span>
+                        {selectedTools.includes(tool.id) && <Check className="h-3.5 w-3.5 text-emerald-400" />}
+                      </div>
+                      <p className="text-[10px] opacity-75">
+                        {tool.connected ? tool.desc : `Connect ${tool.pluginName} to use this`}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="pt-2">
@@ -269,7 +320,7 @@ export const CreateBotModal: React.FC<CreateBotModalProps> = ({
                   isDark ? 'bg-white text-black hover:bg-[#e7e9ea]' : 'bg-black text-white hover:bg-[#272c30]'
                 }`}
               >
-                {isSubmitting ? 'Creating Teammate...' : 'Create Teammate'}
+                {isSubmitting ? 'Creating…' : 'Create bot'}
               </button>
             </div>
           </form>

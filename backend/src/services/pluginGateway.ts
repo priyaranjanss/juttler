@@ -1,4 +1,4 @@
-﻿/**
+/**
  * The Tool Gateway â€” the single path every bot tool call goes through.
  *
  * Order of checks:
@@ -12,7 +12,7 @@
  */
 
 import { ApprovalRequest } from '../types';
-import { PLUGINS } from '../config/pluginCatalog';
+import { PLUGINS, findPluginForTool, runTool, registry, resolveTool } from '../plugins';
 import { generateId } from '../utils/id';
 import { sql } from '../config/db';
 import {
@@ -23,9 +23,11 @@ import {
   recordToolCallLog,
   listBotAvailableTools,
   markInstallationNeedsReauth,
+  updateInstallationAccessToken,
 } from '../repositories/plugins';
-import { runTool } from './toolExecutors';
 import { isWorkspaceTool, executeWorkspaceTool } from './workspaceTools';
+import { findBotById } from '../repositories/bots';
+import { assertWorkScope } from './workScope';
 
 export interface GatewayRequest {
   userId: string;
@@ -50,9 +52,28 @@ export type GatewayOutcome =
       needsReauth?: boolean;
     };
 
-/** Which catalog plugin owns a tool, if any. */
+/**
+ * Which plugin owns a tool, resolved through the registry so any spelling of
+ * the name (canonical "slack.list_channels", legacy "slack_list_channels", or
+ * the bare "list_channels") finds its owner.
+ */
 function ownerPluginOf(toolName: string) {
-  return PLUGINS.find((p) => p.tools.some((t) => t.name === toolName));
+  const slug = resolveTool(registry, toolName)?.pluginSlug;
+  if (!slug) return undefined;
+  return PLUGINS.find((p) => p.slug === slug);
+}
+
+/** Null when the call stays on the bot's desk. A string is the reason to refuse it. */
+async function outsideWorkDesk(botId: string, pluginSlug: string, args: Record<string, any>): Promise<string | null> {
+  if (pluginSlug !== 'github' && pluginSlug !== 'jira') return null;
+  const bot = await findBotById(botId);
+  if (!bot) return 'Bot not found.';
+  try {
+    assertWorkScope(bot, pluginSlug, args);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : 'That call is outside this bot\'s work desk.';
+  }
 }
 
 /**
@@ -79,6 +100,11 @@ export async function callTool(req: GatewayRequest): Promise<GatewayOutcome> {
   // 2. Not enabled for this bot
   if (!permission.enabled) {
     return { kind: 'not_enabled', toolName, pluginSlug: owner.slug };
+  }
+
+  const scopeError = await outsideWorkDesk(req.botId, owner.slug, req.args);
+  if (scopeError) {
+    return { kind: 'result', toolName, ok: false, result: { error: scopeError }, durationMs: 0 };
   }
 
   // 3. Sensitive -> approval gate (nothing runs until the user approves)
@@ -117,10 +143,21 @@ export async function executeApprovedTool(req: GatewayRequest): Promise<GatewayO
     return { kind: 'not_installed', pluginSlug: owner.slug, toolName };
   }
 
+  const scopeError = await outsideWorkDesk(req.botId, owner.slug, req.args);
+  if (scopeError) {
+    return { kind: 'result', toolName, ok: false, result: { error: scopeError }, durationMs: 0 };
+  }
+
   const credential = await getInstallationCredential(installation.id);
   const metadata = installation.metadata || {};
 
-  const outcome = await runTool(toolName, req.args, { credential, metadata });
+  const outcome = await runTool(toolName, req.args, {
+    credential,
+    metadata,
+    // A tool that refreshed its access token hands the new one back so it is
+    // persisted; the refresh token is preserved.
+    refreshAccessToken: (token) => updateInstallationAccessToken(installation.id, token, credential),
+  });
 
   // A rejected credential means the user must re-authorise: flag it so the UI
   // prompts them instead of failing silently on every later call.

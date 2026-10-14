@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../../contexts/AppContext';
 import { useRouter } from '../../router';
 import { BotBlobAvatar } from '../common/BotBlobAvatar';
@@ -48,6 +48,70 @@ function summariseWorkspaceArgs(toolName: string, args: Record<string, any> | un
       return '';
   }
 }
+
+// Copy escalates as the wait grows, so a long turn never looks stalled.
+function thinkingLabel(elapsedMs: number): string {
+  if (elapsedMs < 3000) return 'Thinking';
+  if (elapsedMs < 10000) return 'Working on it';
+  if (elapsedMs < 25000) return 'Still working - this can take a while';
+  return 'Still on it - gathering what it needs';
+}
+
+/** Ticks only while active, so an idle indicator costs nothing. */
+function useElapsed(active: boolean): number {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (!active) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsed(0);
+    const id = window.setInterval(() => setElapsed(Date.now() - startedAt), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+
+  return elapsed;
+}
+
+/**
+ * Shown while a reply is being generated, so the wait is visibly alive rather
+ * than an empty thread after the user's message.
+ */
+const ThinkingIndicator: React.FC<{ bot?: Bot; isDark: boolean }> = ({ bot, isDark }) => {
+  const elapsed = useElapsed(true);
+
+  return (
+    <div className="flex items-center space-x-2.5 px-1" aria-live="polite">
+      <BotBlobAvatar
+        name={bot?.name || 'Bot'}
+        avatarShape={bot?.avatar}
+        color={bot?.color}
+        size={28}
+      />
+
+      <div className="flex items-center space-x-2">
+        {/* Three dots, staggered */}
+        <div className="flex items-center space-x-1" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className={`h-1.5 w-1.5 rounded-full motion-safe:animate-bounce ${
+                isDark ? 'bg-[#71767b]' : 'bg-[#8b98a5]'
+              }`}
+              style={{ animationDelay: `${i * 0.16}s`, animationDuration: '0.9s' }}
+            />
+          ))}
+        </div>
+
+        <span className={`text-[11px] font-semibold ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
+          {thinkingLabel(elapsed)}
+        </span>
+      </div>
+    </div>
+  );
+};
 
 // The Chief of Staff hands work to specialists with this tool; the chat renders
 // it as a delegation card rather than a raw tool call.
@@ -105,8 +169,8 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
   const [messages, setMessages] = useState<Message[]>([]);
   const [isMessagesLoading, setIsMessagesLoading] = useState(false);
   const [messageLoadError, setMessageLoadError] = useState(false);
-  const [inputText, setInputText] = useState('');
-  const [isSending, setIsSending] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [sendingConversationIds, setSendingConversationIds] = useState<Set<string>>(() => new Set());
   const [expandedToolCalls, setExpandedToolCalls] = useState<Record<string, boolean>>({});
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   // Approval id currently being resolved, so we can show a spinner on that card
@@ -117,36 +181,65 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const selectedConversationIdRef = useRef<string | null>(selectedConversationId);
+  selectedConversationIdRef.current = selectedConversationId;
+  const sendingConversationIdsRef = useRef<Set<string>>(new Set());
 
   // Current active conversation
-  const currentConv =
-    conversations.find((c) => c.id === selectedConversationId) || conversations[0];
+  const currentConv = conversations.find((c) => c.id === selectedConversationId) || null;
+  const inputText = currentConv ? drafts[currentConv.id] || '' : '';
+  const isSending = currentConv ? sendingConversationIds.has(currentConv.id) : false;
+  const setInputText = (value: string) => {
+    if (!currentConv) return;
+    const conversationId = currentConv.id;
+    setDrafts((previous) => ({ ...previous, [conversationId]: value }));
+  };
 
-  // Primary active bot in conversation
-  const activeBotInThread =
-    bots.find((b) => currentConv?.participantBotIds?.includes(b.id)) ||
-    bots.find((b) => b.isChiefOfStaff) ||
-    bots[0];
+  /**
+   * The bot this thread is actually addressed to.
+   *
+   * It is read from the conversation's own participant order, not from the
+   * global bot list: a thread created for Devon has participantBotIds ["devon"],
+   * and searching the global list first would hand the message to whichever
+   * participant happens to appear earliest there — usually the Chief. That is
+   * what let a message meant for one bot get answered by another.
+   */
+  const activeBotInThread = useMemo(() => {
+    const participants = currentConv?.participantBotIds ?? [];
+
+    // The first participant is the thread's designated recipient.
+    for (const botId of participants) {
+      const bot = bots.find((b) => b.id === botId);
+      if (bot) return bot;
+    }
+
+    return bots.find((b) => b.isChiefOfStaff) || bots[0] || null;
+  }, [currentConv?.participantBotIds, bots]);
 
   // Load messages whenever the selected conversation changes; ignore stale
   // responses if the user switches conversations before a request completes.
   const fetchMessages = async () => {
     if (!currentConv) return;
+    const conversationId = currentConv.id;
     setIsMessagesLoading(true);
     setMessageLoadError(false);
     try {
-      const msgs = await api.getMessages(currentConv.id);
-      setMessages(msgs);
+      const msgs = await api.getMessages(conversationId);
+      if (selectedConversationIdRef.current === conversationId) setMessages(msgs);
     } catch (err) {
+      if (selectedConversationIdRef.current !== conversationId) return;
       console.error('Failed to load messages:', err);
       setMessageLoadError(true);
     } finally {
-      setIsMessagesLoading(false);
+      if (selectedConversationIdRef.current === conversationId) setIsMessagesLoading(false);
     }
   };
 
   useEffect(() => {
     let isCurrent = true;
+    setIsPluginMentionOpen(false);
+    setPluginMention('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
     if (!currentConv) {
       setMessages([]);
       setIsMessagesLoading(false);
@@ -179,7 +272,7 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isSending]);
+  }, [messages, isSending, currentConv?.id]);
 
   // Auto-grow textarea. Typing "@" opens a plugin mention list, so the user can
   // point a bot at a connected service without remembering tool names.
@@ -210,17 +303,20 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
 
   const handleSendMessage = async (customPrompt?: string) => {
     const textToSend = customPrompt || inputText;
-    if (!textToSend.trim() || isSending || !currentConv) return;
+    if (!textToSend.trim() || !currentConv) return;
 
-    setInputText('');
+    const conversationId = currentConv.id;
+    if (sendingConversationIdsRef.current.has(conversationId)) return;
+    sendingConversationIdsRef.current.add(conversationId);
+    setSendingConversationIds(new Set(sendingConversationIdsRef.current));
+
+    setDrafts((previous) => ({ ...previous, [conversationId]: '' }));
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setIsPluginMentionOpen(false);
-    setIsSending(true);
-
     // Optimistically add user message
     const optimisticMsg: Message = {
       id: `temp_${Date.now()}`,
-      conversationId: currentConv.id,
+      conversationId,
       senderType: 'user',
       senderId: currentUser.id,
       senderName: currentUser.name,
@@ -228,27 +324,35 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
       type: 'text',
       timestamp: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, optimisticMsg]);
+    if (selectedConversationIdRef.current === conversationId) {
+      setMessages((prev) => [...prev, optimisticMsg]);
+    }
 
     try {
       const response = await api.sendChatMessage({
-        conversationId: currentConv.id,
+        conversationId,
         userId: currentUser.id,
         messageContent: textToSend,
         targetBotId: activeBotInThread?.id,
       });
 
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== optimisticMsg.id),
-        ...response.messages,
-      ]);
+      if (selectedConversationIdRef.current === conversationId) {
+        const responseIds = new Set(response.messages.map((message) => message.id));
+        setMessages((prev) => [
+          ...prev.filter((m) => m.id !== optimisticMsg.id && !responseIds.has(m.id)),
+          ...response.messages.filter((m) => m.conversationId === conversationId),
+        ]);
+      }
       await refreshData();
     } catch (err) {
       console.error('Failed to send message:', err);
       showToast('Error communicating with bot', 'warning');
-      setMessages((prev) => prev.filter((m) => m.id !== optimisticMsg.id));
+      if (selectedConversationIdRef.current === conversationId) {
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticMsg.id));
+      }
     } finally {
-      setIsSending(false);
+      sendingConversationIdsRef.current.delete(conversationId);
+      setSendingConversationIds(new Set(sendingConversationIdsRef.current));
     }
   };
 
@@ -273,9 +377,9 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
       const { approval, toolResult } = await api.resolveApproval(approvalId, { status: 'approved' });
 
       // The backend may have run the tool; if it attached a result, show it
-      if (toolResult) {
+      if (toolResult && selectedConversationIdRef.current === toolResult.conversationId) {
         setMessages((prev) => [...prev, toolResult]);
-      } else {
+      } else if (!toolResult) {
         await fetchMessages();
       }
       showToast(`${approval.botName} executed ${approval.toolName}`, 'success');
@@ -363,7 +467,13 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
 
     // Already showing this bot? Then nothing to do.
     const activeConv = conversations.find((c) => c.id === selectedConversationId);
-    if (activeConv && activeConv.participantBotIds[0] === botIdFromUrl) return;
+    if (
+      activeConv &&
+      (activeConv.source ?? 'app') !== 'slack' &&
+      activeConv.participantBotIds[0] === botIdFromUrl
+    ) {
+      return;
+    }
 
     openChatWithBot(botIdFromUrl);
   }, [botIdFromUrl, bots, conversations, selectedConversationId, currentUser, navigate, openChatWithBot]);
@@ -781,6 +891,10 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
               </div>
             );
           })
+        )}
+        {/* Reply in progress - keeps the wait visibly alive */}
+        {isSending && !isMessagesLoading && (
+          <ThinkingIndicator bot={activeBotInThread} isDark={isDark} />
         )}
         <div ref={messagesEndRef} />
       </div>

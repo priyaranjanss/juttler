@@ -39,7 +39,14 @@ export interface Bot {
   aiProvider: AiProvider;
   aiEndpoint: string;
   aiModel: string;
+  /** The API reports key presence without returning the saved secret. */
+  aiApiKeyConfigured?: boolean;
   aiApiKey: string;
+  isTeamBot?: boolean;
+  teamId?: string | null;
+  publishedAt?: string | null;
+  jiraProject?: string | null;
+  githubRepos?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -110,8 +117,49 @@ export interface Conversation {
   participantBotIds: string[];
   lastMessageSnippet?: string;
   lastMessageAt: string;
+  source?: 'app' | 'slack';
   createdAt: string;
   updatedAt: string;
+}
+
+export type SlackBotInstallStatus =
+  | 'not_connected'
+  | 'pending_install'
+  | 'awaiting_admin_approval'
+  | 'connected'
+  | 'error';
+
+/** What the bot settings panel shows for a Team Bot's own Slack app. */
+export interface SlackBotInstall {
+  status: SlackBotInstallStatus;
+  slackTeamId: string | null;
+  slackTeamName: string | null;
+  botUserId: string | null;
+  detail: string | null;
+  published: boolean;
+  isTeamBot: boolean;
+  canManage: boolean;
+  ownerSlackConnected: boolean;
+  ownerSlackTeamName: string | null;
+}
+
+export interface TeamMemberView {
+  userId: string;
+  name: string;
+  email: string;
+  role: 'owner' | 'manager' | 'member';
+  slackLinked: boolean;
+  slackDisplayName?: string | null;
+}
+
+export interface TeamView {
+  id: string;
+  name: string;
+  role: 'owner' | 'manager' | 'member';
+  slackLinked: boolean;
+  slackDisplayName?: string | null;
+  slackTeamId: string | null;
+  members: TeamMemberView[];
 }
 
 // ---------------------------------------------------------------------------

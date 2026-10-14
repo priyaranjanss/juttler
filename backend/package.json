@@ -9,7 +9,8 @@
     "db:migrate": "tsx db/migrate.ts",
     "db:clean": "tsx db/clean.ts",
     "seed:admin": "tsx db/seed-admin.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test src/services/slackTeam/decide.test.ts src/services/workScope.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.77",

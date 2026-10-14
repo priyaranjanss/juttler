@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Runs a bot turn end-to-end: collects the tools that bot may call, exposes
  * delegation to specialists when the bot is the Chief of Staff, and streams the
  * real tool activity back so the chat can render it.
@@ -9,11 +9,14 @@
 
 import { Bot, Message } from '../types';
 import { listBotsForUser, findBotById } from '../repositories/bots';
-import { listBotAvailableTools } from '../repositories/plugins';
+import { listBotAvailableTools, listPluginDefinitions, listInstallations } from '../repositories/plugins';
+import { PLUGINS } from '../plugins';
 import { runBotTurn, BotToolSpec, ToolEvent, ToolExecution } from './aiService';
 import { callTool, executeApprovedTool } from './pluginGateway';
-import { buildChiefSystemPrompt, isChiefOfStaffBot, RosterEntry } from '../config/chiefOfStaff';
+import { buildChiefSystemPrompt, isChiefOfStaffBot, RosterEntry, WorkspaceService } from '../config/chiefOfStaff';
 import { WORKSPACE_TOOLS, isWorkspaceTool, executeWorkspaceTool } from './workspaceTools';
+import { describeWorkDesk } from './workScope';
+import { findSlackAppByBotId } from '../repositories/slackApps';
 
 export const DELEGATE_TOOL = 'delegate_to_bot';
 
@@ -25,6 +28,32 @@ const MAX_DELEGATION_DEPTH = 2;
 function chiefPolicy(agent: Bot): { canDelegate: boolean; canManage: boolean } {
   const isChief = isChiefOfStaffBot(agent);
   return { canDelegate: isChief, canManage: isChief };
+}
+
+/** Every plugin with its connection status, so the Chief never has to look it up. */
+async function describeServices(userId: string): Promise<WorkspaceService[]> {
+  const installations = await listInstallations(userId);
+  const connected = new Set(
+    installations.filter((installation) => installation.status === 'connected').map((i) => i.pluginSlug)
+  );
+
+  return PLUGINS.map((p) => ({
+    name: p.name,
+    slug: p.slug,
+    connected: connected.has(p.slug),
+    toolCount: p.tools.length,
+    needs: connected.has(p.slug) ? [] : p.requiredCredentials.map((c) => c.label),
+  }));
+}
+
+/** Tool access per bot, keyed by bot id, as canonical "plugin.tool" ids. */
+async function describeToolAccess(roster: Bot[]): Promise<Map<string, string[]>> {
+  const map = new Map<string, string[]>();
+  for (const b of roster) {
+    const available = await listBotAvailableTools(b.userId, b.id);
+    map.set(b.id, available.map((t) => t.toolId));
+  }
+  return map;
 }
 
 export interface TurnRun {
@@ -45,15 +74,23 @@ export interface RunTurnOptions {
   depth?: number;
   /** Thread the approval result should be posted back into. */
   conversationId?: string;
+  /** Extra system instructions for this turn only. */
+  systemAddendum?: string;
 }
 
-/** Tools a bot is allowed to call, as model-facing specs. */
+/**
+ * Tools a bot is allowed to call, as model-facing specs.
+ *
+ * Names are the registry's canonical "plugin.tool" ids, and every plugin's real
+ * parameter schema is passed through so the model can fill the arguments in
+ * instead of guessing at them.
+ */
 async function toolSpecsFor(userId: string, botId: string): Promise<BotToolSpec[]> {
   const available = await listBotAvailableTools(userId, botId);
   return available.map((t) => ({
-    name: t.toolName,
-    description: `${t.description} (plugin: ${t.pluginSlug})`,
-    parameters: { type: 'object', properties: {} },
+    name: t.toolId,
+    description: `${t.description} (provided by the ${t.pluginSlug} plugin)`,
+    parameters: t.parameters ?? { type: 'object', properties: {} },
   }));
 }
 
@@ -87,6 +124,9 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
   const roster = await listBotsForUser(userId);
   const specialists = roster.filter((b) => b.id !== bot.id);
   const toolSpecs = await toolSpecsFor(userId, bot.id);
+
+  // "plugin.tool" each roster member may actually call, for the Chief's prompt.
+  const toolNamesByBot = await describeToolAccess(roster);
 
   // The Chief of Staff may hand work to specialists (but never recursively
   // forever, and never from inside a specialist's own turn).
@@ -128,7 +168,10 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
           roleTitle: b.roleTitle,
           systemPrompt: b.systemPrompt,
           allowedTools: b.allowedTools,
-        }))
+          isChief: b.id === bot.id || isChiefOfStaffBot(b),
+          tools: toolNamesByBot.get(b.id) ?? [],
+        })),
+        await describeServices(userId)
       )
     : undefined;
 
@@ -178,17 +221,49 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
       });
 
       if (sub.error) {
+        // Tell the delegating bot to answer the user itself rather than retry
+        // the hand-off, which is what causes a stalled multi-round loop.
+        const isMissingLlm = sub.error.kind === 'not_configured';
         return {
           kind: 'result',
           ok: false,
-          result: { from: specialist.name, error: `${specialist.name} could not answer: ${sub.error.message}` },
+          result: {
+            from: specialist.name,
+            error: `${specialist.name} could not complete this: ${sub.error.message}`,
+            // A specialist with no LLM is not a dead end for the delegating
+            // bot: if the Chief holds the tools itself it should use them
+            // rather than reporting a blocker the user has to go and fix.
+            next_step: isMissingLlm
+              ? `${specialist.name} has no LLM configured to reason with. If you have a tool of your own that does this work, call it directly now instead of delegating again. Only if you have no such tool, tell the user exactly which setting to change and stop.`
+              : 'Do not delegate this again. Answer the user with what you know, and say plainly that this part could not be completed and why.',
+          },
+        };
+      }
+
+      if (sub.waitingForApproval) {
+        // The specialist is parked on an approval card. Do not report a void
+        // answer - tell the delegating bot the work is paused.
+        return {
+          kind: 'result',
+          ok: true,
+          result: {
+            from: specialist.name,
+            answer: `${specialist.name} paused to request the user's approval before finishing this.`,
+            status: 'waiting_for_user_approval',
+            next_step: 'Stop here. Tell the user the work is waiting on their approval and what it is waiting for.',
+          },
         };
       }
 
       return {
         kind: 'result',
         ok: true,
-        result: { from: specialist.name, answer: sub.text },
+        result: {
+          from: specialist.name,
+          answer: sub.text,
+          // Nudge the delegating bot to wrap up with this result.
+          next_step: 'Use the result above to answer the user now. Do not delegate the same work again.',
+        },
       };
     }
 
@@ -197,6 +272,7 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
       userId,
       botId: bot.id,
       botName: bot.name,
+      conversationId,
       toolName,
       args,
     });
@@ -223,6 +299,19 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     };
   };
 
+  const accounts = new Set(
+    toolSpecs
+      .map((tool) => (tool.name.includes('.') ? tool.name.slice(0, tool.name.indexOf('.')) : ''))
+      .filter(Boolean)
+  );
+  const slackApp = await findSlackAppByBotId(bot.id);
+  const accountLine = accounts.size > 0
+    ? `Accounts this bot can use right now: ${[...accounts].join(', ')}. Use them for whatever was asked. Do not say one of these is disconnected.`
+    : 'No plugin tools are enabled for this bot on this turn. Do not invent live account data.';
+  const slackInstall = slackApp?.status === 'connected' && !accounts.has('slack')
+    ? `This bot is installed in Slack as itself (@${bot.name}).`
+    : '';
+
   const turn = await runBotTurn({
     bot,
     userName,
@@ -231,6 +320,7 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     tools: toolSpecs,
     executor,
     overrideSystemPrompt: systemPrompt,
+    systemAddendum: [options.systemAddendum, describeWorkDesk(bot), accountLine, slackInstall].filter(Boolean).join('\n\n'),
   });
 
   return {

@@ -1,6 +1,8 @@
-﻿import { Bot } from '../types';
+import { Bot } from '../types';
 import { sql } from '../config/db';
 import { generateId } from '../utils/id';
+import { chiefDefaultTools } from '../config/chiefOfStaff';
+import { decryptTokenSafe, encryptToken } from '../services/tokenCrypto';
 
 interface BotRow {
   id: string;
@@ -18,6 +20,11 @@ interface BotRow {
   ai_endpoint: string | null;
   ai_model: string | null;
   ai_api_key: string | null;
+  is_team_bot?: boolean;
+  team_id?: string | null;
+  published_at?: Date | string | null;
+  jira_project?: string | null;
+  github_repos?: string[] | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -39,9 +46,24 @@ function mapRow(row: BotRow): Bot {
     aiEndpoint: row.ai_endpoint || 'https://api.kilo.ai/api/gateway',
     // Empty when unset â€” the user must pick a model in bot settings.
     aiModel: row.ai_model || '',
-    aiApiKey: row.ai_api_key || '',
+    aiApiKey: decryptTokenSafe(row.ai_api_key),
+    isTeamBot: row.is_team_bot === true,
+    teamId: row.team_id ?? null,
+    publishedAt: row.published_at ? new Date(row.published_at).toISOString() : null,
+    jiraProject: row.jira_project ?? null,
+    githubRepos: Array.isArray(row.github_repos) ? row.github_repos.filter((repo) => typeof repo === 'string') : [],
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+/** Bot shape safe to return from an API: never serialize the provider secret. */
+export function toPublicBot(bot: Bot): Bot {
+  const { aiApiKey, ...publicBot } = bot;
+  return {
+    ...publicBot,
+    aiApiKey: '',
+    aiApiKeyConfigured: Boolean(aiApiKey),
   };
 }
 
@@ -76,9 +98,11 @@ export async function createBot(data: {
   aiEndpoint?: string;
   aiModel?: string;
   aiApiKey?: string | null;
+  isTeamBot?: boolean;
+  teamId?: string | null;
 }): Promise<Bot> {
   const rows = (await sql`
-    insert into bots (id, user_id, name, role_title, system_prompt, avatar, color, allowed_tools, is_chief_of_staff, memory_enabled, ai_provider, ai_endpoint, ai_model, ai_api_key)
+    insert into bots (id, user_id, name, role_title, system_prompt, avatar, color, allowed_tools, is_chief_of_staff, memory_enabled, ai_provider, ai_endpoint, ai_model, ai_api_key, is_team_bot, team_id)
     values (
       ${generateId('bot_')},
       ${data.userId},
@@ -87,17 +111,39 @@ export async function createBot(data: {
       ${data.systemPrompt || `You are ${data.name}, ${data.roleTitle}. Assist your teammate effectively.`},
       ${data.avatar || 'blob'},
       ${data.color || '#6366f1'},
-      ${JSON.stringify(data.allowedTools || ['web_search'])}::jsonb,
+      ${JSON.stringify(data.allowedTools ?? chiefDefaultTools())}::jsonb,
       ${data.isChiefOfStaff ?? false},
       ${data.memoryEnabled !== false},
       ${data.aiProvider || 'kilo_gateway'},
       ${data.aiEndpoint || 'https://api.kilo.ai/api/gateway'},
       ${data.aiModel?.trim() || null},
-      ${data.aiApiKey ?? null}
+      ${data.aiApiKey ? encryptToken(data.aiApiKey) : null},
+      ${data.isTeamBot === true},
+      ${data.teamId ?? null}
     )
     returning *
   `) as unknown as BotRow[];
   return mapRow(rows[0]);
+}
+
+/** Stores the owner record a Slack app needs. The bot stays a normal bot. */
+export async function attachBotTeam(id: string, teamId: string): Promise<void> {
+  await sql`
+    update bots
+    set team_id = ${teamId}, updated_at = now()
+    where id = ${id}
+  `;
+}
+
+/** Makes a Team Bot visible to the team. Slack can be attached only after this. */
+export async function publishTeamBot(id: string): Promise<Bot | null> {
+  const rows = (await sql`
+    update bots
+    set published_at = coalesce(published_at, now()), updated_at = now()
+    where id = ${id} and is_team_bot
+    returning *
+  `) as unknown as BotRow[];
+  return rows.length > 0 ? mapRow(rows[0]) : null;
 }
 
 export async function updateBot(id: string, updates: Record<string, unknown>): Promise<Bot | null> {
@@ -115,6 +161,8 @@ export async function updateBot(id: string, updates: Record<string, unknown>): P
     aiEndpoint: 'ai_endpoint',
     aiModel: 'ai_model',
     aiApiKey: 'ai_api_key',
+    jiraProject: 'jira_project',
+    githubRepos: 'github_repos',
   };
 
   const setters: string[] = [];
@@ -122,9 +170,16 @@ export async function updateBot(id: string, updates: Record<string, unknown>): P
 
   for (const [key, column] of Object.entries(columnMap)) {
     if (updates[key] !== undefined) {
-      const value = column === 'allowed_tools' ? JSON.stringify(updates[key]) : updates[key];
+      let value = updates[key];
+      let cast = '';
+      if (column === 'allowed_tools' || column === 'github_repos') {
+        value = JSON.stringify(value ?? []);
+        cast = '::jsonb';
+      }
+      if (column === 'ai_api_key') {
+        value = typeof value === 'string' && value ? encryptToken(value) : null;
+      }
       values.push(value);
-      const cast = column === 'allowed_tools' ? '::jsonb' : '';
       setters.push(`${column} = $${values.length}${cast}`);
     }
   }

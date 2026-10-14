@@ -7,6 +7,8 @@ declare global {
   namespace Express {
     interface Request {
       user?: UserRecord;
+      /** Original JSON bytes, kept so Slack can verify the request signature. */
+      rawBody?: Buffer;
     }
   }
 }
@@ -18,9 +20,12 @@ export const PUBLIC_AUTH_PATHS = ['/auth/register', '/auth/login', '/auth/logout
 // so these must be reachable without a session. Safety comes from the single-use
 // CSRF state minted by POST /plugins/:slug/oauth/start, not from the session.
 const OAUTH_CALLBACK_PATH = /^\/plugins\/[^/]+\/callback$/;
+// Slack calls these with no Juttler session. Events are signed; the install
+// callback is protected by the single-use OAuth state.
+const SLACK_PUBLIC_PATH = /^\/slack\/(?:events|team-bots\/callback)$/;
 
 export function isPublicAuthPath(path: string): boolean {
-  return PUBLIC_AUTH_PATHS.includes(path) || OAUTH_CALLBACK_PATH.test(path);
+  return PUBLIC_AUTH_PATHS.includes(path) || OAUTH_CALLBACK_PATH.test(path) || SLACK_PUBLIC_PATH.test(path);
 }
 
 export function readBearerToken(req: Request): string | undefined {

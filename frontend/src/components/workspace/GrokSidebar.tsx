@@ -298,23 +298,10 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
                   isDark ? 'border-[#26292d] bg-[#16181c] text-white' : 'border-[#e5e7eb] bg-white text-[#0f1419]'
                 }`}
               >
-                {/* Settings - placeholder, does nothing yet */}
-                <button
-                  role="menuitem"
-                  onClick={() => setAccountMenuOpen(false)}
-                  className={`flex w-full items-center space-x-2.5 px-3 py-2 text-xs font-semibold transition ${
-                    isDark ? 'hover:bg-[#202327]' : 'hover:bg-[#f0f2f5]'
-                  }`}
-                >
-                  <Settings2 className="h-4 w-4 text-[#71767b]" />
-                  <span>Settings</span>
-                </button>
-
-                {/* Change theme - switches between light and dark */}
                 <button
                   role="menuitem"
                   onClick={() => toggleTheme()}
-                  className={`flex w-full items-center space-x-2.5 border-t px-3 py-2 text-xs font-semibold transition ${
+                  className={`flex w-full items-center space-x-2.5 px-3 py-2 text-xs font-semibold transition ${
                     isDark ? 'border-[#26292d] hover:bg-[#202327]' : 'border-[#e5e7eb] hover:bg-[#f0f2f5]'
                   }`}
                 >
