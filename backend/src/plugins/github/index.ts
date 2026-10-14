@@ -33,7 +33,7 @@ export const githubPlugin: PluginModule = {
       {
         name: 'get_file',
         description:
-          'Read the full text of a file from a repository. Returns content you can use to edit and write_file. Prefer this over asking the user to paste code.',
+          'Read the full text of a file. Always pass path as one repo-relative string from search_code/list_tree results. Prefer this over asking the user to paste code.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -45,9 +45,17 @@ export const githubPlugin: PluginModule = {
             path: {
               type: 'string',
               description:
-                'Repo-relative file path, e.g. "backend/src/file.ts". Required. Aliases file / file_path also accepted.',
+                'Required. Exact repo-relative path of one file (example: src/index.ts). Never omit this. Never pass punctuation or comma-separated lists.',
             },
             ref: { type: 'string', description: 'Branch, tag, or commit SHA (defaults to the default branch)' },
+            start_line: {
+              type: 'number',
+              description: 'Optional 1-based start line for large files (inclusive).',
+            },
+            end_line: {
+              type: 'number',
+              description: 'Optional 1-based end line for large files (inclusive).',
+            },
           },
           required: ['path'],
         },
@@ -191,8 +199,37 @@ export const githubPlugin: PluginModule = {
         },
       },
       {
+        name: 'edit_file',
+        description:
+          'Surgically edit an existing file on a branch (search/replace). Prefer this over write_file for bug fixes. Creates the branch if needed. Pass exact old_string from get_file.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            repo: {
+              type: 'string',
+              description: 'Repository owner/name. Omit when this bot has exactly one allowed repository.',
+            },
+            path: { type: 'string', description: 'File path in the repository' },
+            branch: { type: 'string', description: 'Branch to edit on (created from default if missing)' },
+            old_string: {
+              type: 'string',
+              description: 'Exact text to find in the file (copy from get_file, including whitespace)',
+            },
+            new_string: { type: 'string', description: 'Replacement text' },
+            replace_all: {
+              type: 'boolean',
+              description: 'Replace every match (default false — requires a unique old_string)',
+            },
+            message: { type: 'string', description: 'Commit message (optional)' },
+          },
+          required: ['path', 'branch', 'old_string', 'new_string'],
+        },
+      },
+      {
         name: 'write_file',
-        description: 'Create or replace one file on a branch. Create the branch first. This does not merge to the default branch.',
+        description:
+          'Create a new file or fully replace one file on a branch. Prefer edit_file for small changes to existing files. Creates the branch if needed.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -203,7 +240,7 @@ export const githubPlugin: PluginModule = {
             },
             path: { type: 'string', description: 'File path in the repository' },
             content: { type: 'string', description: 'Full new contents of the file' },
-            branch: { type: 'string', description: 'Branch to write on. Must already exist.' },
+            branch: { type: 'string', description: 'Branch to write on (created from default if missing)' },
             message: { type: 'string', description: 'Commit message' },
           },
           required: ['path', 'content', 'branch', 'message'],

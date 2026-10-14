@@ -63,7 +63,6 @@ const PATH_ALIASES = [
   'filePath',
   'filename',
   'file_name',
-  'name',
   'target',
   'src',
 ] as const;

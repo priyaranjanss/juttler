@@ -13,14 +13,15 @@ import {
   sanitizeFileContent,
   sanitizeRepoPath,
 } from '../../services/toolArgSanitize';
+import { applySearchReplace } from './edit';
 
 /** Required repo-relative path — accepts file / file_path / … aliases. */
 function requiredPath(args: Record<string, any>): string {
   const path = resolvePathArg(args) || (typeof args.path === 'string' ? sanitizeRepoPath(args.path) : '');
   if (!path || !isPlausibleRepoPath(path)) {
     throw new Error(
-      'Missing or invalid "path". Pass one repo-relative file path like backend/src/services/slackFormat.ts ' +
-        '(not punctuation, not a comma list). Use list_tree or search_code first if you need the path.'
+      'Missing or invalid "path". Pass one repo-relative file path (for example src/app.ts). ' +
+        'Call github.search_code or github.list_tree first, then get_file with the exact "path" field from those results.'
     );
   }
   return path;
@@ -112,6 +113,66 @@ function isAlreadyExists(err: unknown): boolean {
   return /\(422\)/.test(message) && /already exists|Reference already exists/i.test(message);
 }
 
+/** Create the branch from default if it does not exist yet (Cursor-like: edit without fuss). */
+async function ensureBranch(
+  args: Record<string, any>,
+  headers: Record<string, string>,
+  branchName: string
+): Promise<{ branch: string; created: boolean }> {
+  const name = sanitizeBranchName(branchName);
+  if (!name) throw new Error('branch is required.');
+  try {
+    await resolveCommitSha(args, headers, name);
+    return { branch: name, created: false };
+  } catch {
+    // Missing — create from the default branch.
+  }
+  const repoInfo = await requestJson(repoUrl(args), { headers });
+  const from = repoInfo.default_branch;
+  if (!from) throw new Error('Could not determine the default branch to create from.');
+  const baseSha = await resolveCommitSha(args, headers, from);
+  try {
+    await requestJson(repoUrl(args, '/git/refs'), {
+      method: 'POST',
+      headers,
+      body: { ref: `refs/heads/${name}`, sha: baseSha },
+    });
+  } catch (err) {
+    if (!isAlreadyExists(err)) throw err;
+  }
+  return { branch: name, created: true };
+}
+
+async function readFileOnBranch(
+  args: Record<string, any>,
+  headers: Record<string, string>,
+  path: string,
+  branch: string
+): Promise<{ content: string; sha: string }> {
+  const encoded = encodeRepoPath(path);
+  const data = await requestJson(
+    `${repoUrl(args, `/contents/${encoded}`)}?ref=${encodeURIComponent(branch)}`,
+    { headers }
+  );
+  if (Array.isArray(data)) {
+    throw new Error(`"${path}" is a directory. Pass a file path.`);
+  }
+  let content: string | null = null;
+  if (typeof data.content === 'string' && data.content.length > 0) {
+    content = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
+  } else if (typeof data.download_url === 'string' && data.download_url) {
+    const downloaded = await fetch(data.download_url, {
+      headers: { Authorization: headers.Authorization, 'User-Agent': headers['User-Agent'] },
+    });
+    if (!downloaded.ok) throw new Error(`GET ${path} download failed (${downloaded.status})`);
+    content = await downloaded.text();
+  }
+  if (content == null || !data.sha) {
+    throw new Error(`Could not read "${path}" on branch ${branch}.`);
+  }
+  return { content, sha: data.sha as string };
+}
+
 export const githubTools: Record<string, ToolExecutor> = {
   list_prs: async (args, ctx) => {
     const state = typeof args.state === 'string' && args.state.trim() ? args.state.trim() : 'open';
@@ -170,15 +231,29 @@ export const githubTools: Record<string, ToolExecutor> = {
       );
     }
 
+    // Optional line window (1-based), like Cursor read_file — keeps large files usable.
+    const startLine = Number(args.start_line) > 0 ? Math.floor(Number(args.start_line)) : 0;
+    const endLine = Number(args.end_line) > 0 ? Math.floor(Number(args.end_line)) : 0;
+    let body = content;
+    let lineWindow: { start_line: number; end_line: number; total_lines: number } | undefined;
+    if (startLine > 0 || endLine > 0) {
+      const lines = content.split('\n');
+      const from = Math.max(1, startLine || 1);
+      const to = Math.min(lines.length, endLine || lines.length);
+      body = lines.slice(from - 1, to).join('\n');
+      lineWindow = { start_line: from, end_line: to, total_lines: lines.length };
+    }
+
     const maxChars = 100_000;
-    const truncated = content.length > maxChars;
+    const truncated = body.length > maxChars;
     return {
       path,
       type: 'file',
       size: typeof data.size === 'number' ? data.size : content.length,
       sha: data.sha ?? null,
       truncated,
-      content: truncated ? content.slice(0, maxChars) : content,
+      ...(lineWindow ? { line_window: lineWindow } : {}),
+      content: truncated ? body.slice(0, maxChars) : body,
     };
   },
 
@@ -342,7 +417,7 @@ export const githubTools: Record<string, ToolExecutor> = {
       results: items,
       hint:
         items.length > 0
-          ? 'Call github.get_file on the paths you need, then write_file / create_pull_request to finish.'
+          ? 'Call github.get_file on the paths you need, then edit_file (or write_file for new files), then create_pull_request.'
           : 'No matches. Try a shorter query or list_tree, then get_file.',
     };
   },
@@ -365,14 +440,16 @@ export const githubTools: Record<string, ToolExecutor> = {
   write_file: async (args, ctx) => {
     const path = requiredPath(args);
     const content = sanitizeFileContent(requiredString(args, 'content'));
-    const branch = sanitizeBranchName(requiredString(args, 'branch'));
+    const branchName = sanitizeBranchName(requiredString(args, 'branch'));
     const message = requiredString(args, 'message');
-    if (!branch) throw new Error('branch is required.');
+    if (!branchName) throw new Error('branch is required.');
     if (Buffer.byteLength(content, 'utf8') > 900_000) {
       throw new Error('That file is too large to write through GitHub. Keep it under 900 KB.');
     }
 
     const headers = githubHeaders(ctx);
+    const ensured = await ensureBranch(args, headers, branchName);
+    const branch = ensured.branch;
     const encoded = encodeRepoPath(path);
     let sha: string | undefined;
     try {
@@ -403,6 +480,61 @@ export const githubTools: Record<string, ToolExecutor> = {
       written: true,
       path,
       branch,
+      branch_created: ensured.created,
+      commit: data.commit?.sha,
+      url: data.content?.html_url,
+    };
+  },
+
+  /**
+   * Surgical edit (Cursor/OpenCode search_replace): replace an exact snippet on a branch.
+   * Prefer this over write_file for existing files — avoids rewriting whole files and token blowups.
+   */
+  edit_file: async (args, ctx) => {
+    const path = requiredPath(args);
+    const branchName = sanitizeBranchName(requiredString(args, 'branch'));
+    if (!branchName) throw new Error('branch is required.');
+    const oldString =
+      typeof args.old_string === 'string'
+        ? args.old_string
+        : typeof args.old_str === 'string'
+          ? args.old_str
+          : requiredString(args, 'old_string');
+    const newString =
+      typeof args.new_string === 'string'
+        ? args.new_string
+        : typeof args.new_str === 'string'
+          ? args.new_str
+          : requiredString(args, 'new_string');
+    const replaceAll = Boolean(args.replace_all);
+    const message =
+      typeof args.message === 'string' && args.message.trim()
+        ? args.message.trim()
+        : `Edit ${path}`;
+
+    const headers = githubHeaders(ctx);
+    const ensured = await ensureBranch(args, headers, branchName);
+    const branch = ensured.branch;
+    const current = await readFileOnBranch(args, headers, path, branch);
+    const edited = applySearchReplace(current.content, oldString, newString, replaceAll);
+
+    const encoded = encodeRepoPath(path);
+    const data = await requestJson(repoUrl(args, `/contents/${encoded}`), {
+      method: 'PUT',
+      headers,
+      body: {
+        message,
+        content: Buffer.from(edited.content, 'utf8').toString('base64'),
+        branch,
+        sha: current.sha,
+      },
+    });
+    return {
+      edited: true,
+      path,
+      branch,
+      branch_created: ensured.created,
+      replacements: edited.replacements,
       commit: data.commit?.sha,
       url: data.content?.html_url,
     };

@@ -131,12 +131,12 @@ export function describeWorkDesk(bot: WorkDesk): string {
   if (bot.githubRepos.length === 1) {
     lines.push(
       `Your only GitHub repository is ${bot.githubRepos[0]}. Omit repo on GitHub tools (it is filled in). ` +
-        'Search, list the tree, read files, edit/write/delete files, create branches, and open pull requests. Do not merge unless the user approves it.'
+        'Use search_code, list_tree, get_file, edit_file (preferred for fixes), write_file, and create_pull_request. Do not merge unless the user approves it.'
     );
   } else if (bot.githubRepos.length > 1) {
     lines.push(
       `GitHub repositories you may fully work in: ${bot.githubRepos.join(', ')}. ` +
-        'Pass repo as owner/name. Search, list the tree, read files, edit/write/delete files, create branches, and open pull requests. ' +
+        'Pass repo as owner/name. Use search_code, get_file, edit_file, write_file, and create_pull_request. ' +
         'Do not use any other repository. Do not merge unless the user approves it.'
     );
   }

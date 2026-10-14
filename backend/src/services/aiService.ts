@@ -5,7 +5,7 @@ import {
   extractEmbeddedToolCalls,
   stripEmbeddedToolMarkup,
 } from './embeddedToolCalls';
-import { sanitizeToolArgs } from './toolArgSanitize';
+import { isPlausibleRepoPath, resolvePathArg, sanitizeToolArgs } from './toolArgSanitize';
 
 // Every bot must have its own explicit model and key. Never fall back to a
 // workspace credential: that would make bots share both identity and billing.
@@ -118,6 +118,8 @@ type ChatMessage = {
 // with an error instead of a reply, so keep this generous; rounds now stop early
 // on their own when a round gains nothing useful.
 const MAX_TOOL_ROUNDS = 18;
+/** Hard wall so long agent turns still return a finish/blocker before the client gives up. */
+const TURN_BUDGET_MS = 170_000;
 const MAX_GATEWAY_ATTEMPTS = 3;
 const MAX_CONTEXT_ITEM_CHARS = 8_000;
 /** Default cap for tool JSON in the model context. File reads get a higher cap. */
@@ -135,6 +137,7 @@ const EXPLORE_TOOLS = new Set([
 ]);
 const ACT_TOOLS = new Set([
   'github.write_file',
+  'github.edit_file',
   'github.delete_file',
   'github.create_branch',
   'github.create_pull_request',
@@ -285,17 +288,58 @@ function userFacingOutcome(events: ToolEvent[]): string {
     return `Done. ${lines.join(' · ')}`;
   }
 
-  const fail = events.find((e) => e.status === 'failed' || e.status === 'unavailable');
+  const fail = events.find((e) => {
+    if (e.status !== 'failed' && e.status !== 'unavailable') return false;
+    // Path mistakes are recoverable — don't surface them as the final answer.
+    if (isPathArgError(e.error)) return false;
+    return true;
+  });
   if (fail) {
     const err = (fail.error || 'failed').replace(/\s+/g, ' ').trim().slice(0, 220);
-    return `I hit a blocker on ${fail.toolName}: ${err}`;
+    return `Blocked on ${fail.toolName}: ${err}`;
+  }
+
+  if (turnHasReads(events) && !turnHasAction(events)) {
+    return 'I stopped before applying the change (no write/PR yet). Say continue and I will finish from the files already read.';
   }
 
   if (turnHasReads(events)) {
-    return 'I gathered the context but did not finish applying the change. Say continue and I will write the patch and open a PR.';
+    return 'I gathered context but could not finish cleanly. Say continue and I will pick up where I left off.';
   }
 
-  return 'I could not finish that yet. Try asking again with a bit more detail.';
+  return 'I could not finish that yet. Say continue and I will try again.';
+}
+
+/** Same tool + same error three times → stop looping and report the blockage. */
+function isStuckOnSameFailure(events: ToolEvent[]): boolean {
+  const fails = events.filter((e) => e.status === 'failed' || e.status === 'unavailable');
+  if (fails.length < 3) return false;
+  const last = fails.slice(-3);
+  const key = `${last[0].toolName}::${(last[0].error || '').slice(0, 160)}`;
+  return last.every((e) => `${e.toolName}::${(e.error || '').slice(0, 160)}` === key);
+}
+
+/** Always leave the user with a finish line or a clear blocker — never an empty turn. */
+function ensureTurnReply(
+  text: string | undefined,
+  events: ToolEvent[],
+  error?: TurnResult['error']
+): TurnResult {
+  const trimmed = text?.trim();
+  if (trimmed && !/^here is what i got so far:/i.test(trimmed) && !/^progress:/i.test(trimmed)) {
+    return { text: trimmed, tools: events, waitingForApproval: false, error };
+  }
+  if (events.length > 0) {
+    return { text: userFacingOutcome(events), tools: events, waitingForApproval: false };
+  }
+  return {
+    tools: events,
+    waitingForApproval: false,
+    error: error ?? {
+      kind: 'bad_response',
+      message: 'No answer was produced. Try rephrasing the request.',
+    },
+  };
 }
 
 function buildToolCapabilityContext(tools: BotToolSpec[]): string {
@@ -463,6 +507,55 @@ function isAskingPermissionToAct(text: string): boolean {
   );
 }
 
+function isPathArgError(message: string | undefined): boolean {
+  return /missing or invalid ["']?path|missing required parameter ["']path/i.test(message || '');
+}
+
+/** Paths discovered earlier this turn — used to repair get_file/write_file without a path. */
+function recentKnownPaths(events: ToolEvent[]): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: unknown) => {
+    if (typeof raw !== 'string') return;
+    const path = raw.trim();
+    if (!isPlausibleRepoPath(path) || seen.has(path)) return;
+    seen.add(path);
+    paths.push(path);
+  };
+
+  for (const event of events) {
+    if (event.status !== 'success' || !event.result || typeof event.result !== 'object') continue;
+    const row = event.result as Record<string, any>;
+    push(row.path);
+    if (Array.isArray(row.results)) {
+      for (const hit of row.results.slice(0, 20)) push(hit?.path);
+    }
+    if (Array.isArray(row.entries)) {
+      for (const entry of row.entries.slice(0, 40)) {
+        if (entry?.type === 'file' || entry?.type === 'blob' || !entry?.type) push(entry?.path);
+      }
+    }
+  }
+  return paths;
+}
+
+/** When the model omits path, reuse a unique path already found this turn. */
+function fillMissingGithubPath(toolName: string, args: Record<string, any>, events: ToolEvent[]): void {
+  if (
+    toolName !== 'github.get_file' &&
+    toolName !== 'github.write_file' &&
+    toolName !== 'github.edit_file' &&
+    toolName !== 'github.delete_file'
+  ) {
+    return;
+  }
+  if (resolvePathArg(args)) return;
+  const known = recentKnownPaths(events);
+  if (known.length === 1) {
+    args.path = known[0];
+  }
+}
+
 function toOpenAiTools(tools: BotToolSpec[]) {
   return tools.map((t) => ({
     type: 'function',
@@ -577,10 +670,33 @@ export async function runBotTurn(params: {
   let emptyReplyRetries = 0;
   let actionNudges = 0;
   let gatewayEmptyRetries = 0;
+  let pathRecoveryNudges = 0;
   const wantsChanges = userAskedForChanges(params.messageContent, params.history);
+  const turnStartedAt = Date.now();
 
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS && !stopToolLoop; round++) {
+      // Leave headroom for the forced final answer before the client/proxy gives up.
+      if (Date.now() - turnStartedAt > TURN_BUDGET_MS) {
+        messages.push({
+          role: 'system',
+          content:
+            'Time budget reached. Stop calling tools. Summarize what you finished and the exact blocker if anything remains.',
+        });
+        stopToolLoop = true;
+        break;
+      }
+
+      if (isStuckOnSameFailure(collected)) {
+        messages.push({
+          role: 'system',
+          content:
+            'The same tool failed repeatedly. Stop retrying it. Tell the user the concrete blocker and what they can do next.',
+        });
+        stopToolLoop = true;
+        break;
+      }
+
       const res = await fetchGateway(url, {
         method: 'POST',
         headers: {
@@ -649,10 +765,11 @@ export async function runBotTurn(params: {
           break;
         }
         return {
-          tools: collected,
+          ...ensureTurnReply(undefined, collected, {
+            kind: 'bad_response',
+            message: 'Gateway returned no content.',
+          }),
           tokenUsage: usage,
-          waitingForApproval: false,
-          error: { kind: 'bad_response', message: 'Gateway returned no content.' },
         };
       }
 
@@ -700,8 +817,8 @@ export async function runBotTurn(params: {
             messages.push({
               role: 'system',
               content: needsMoreWork
-                ? 'Your last message was empty. Continue with tools: create_branch / write_file / create_pull_request (or the Jira update tools) to finish the user request. Do not stop after only reading. Never reply with a Progress list.'
-                : 'Your last message was empty. Call the next tool needed to finish the user request, or if the work is already done, write a short plain-language answer with no tool dumps.',
+                ? 'Your last message was empty. Continue with tools: edit_file / write_file / create_pull_request (or Jira update tools). Do not stop after only reading.'
+                : 'Your last message was empty. Call the next tool needed to finish, or if done write a short plain-language answer with no tool dumps.',
             });
             continue;
           }
@@ -710,48 +827,37 @@ export async function runBotTurn(params: {
             break;
           }
           return {
-            tools: collected,
+            ...ensureTurnReply(undefined, collected, {
+              kind: 'bad_response',
+              message: 'Gateway returned no content.',
+            }),
             tokenUsage: usage,
-            waitingForApproval: false,
-            error: { kind: 'bad_response', message: 'Gateway returned no content.' },
           };
         }
 
-        // Model tried to answer after only reading — push it to finish the work.
-        if (canContinue && needsMoreWork && actionNudges < 5) {
+        // Change requests: never accept a chat reply until a write/PR/Jira mutation lands,
+        // or we are out of rounds (then the forced final answer reports finish vs blocker).
+        const unfinishedChange =
+          wantsChanges && !turnHasAction(collected) && (needsMoreWork || collected.length > 0);
+        if (canContinue && unfinishedChange) {
           actionNudges += 1;
           messages.push({ role: 'assistant', content: text });
           messages.push({
             role: 'system',
-            content:
-              'That reply is premature. You have read context but have not applied changes yet. ' +
-              'Call tools now to finish (for code: create_branch, write_file, create_pull_request as needed). ' +
-              'Only after those tools succeed should you summarize for the user. Never list Progress or tool inventories. Never ask permission to proceed.',
+            content: isAskingPermissionToAct(text)
+              ? 'Do not ask for permission. Call edit_file (or write_file), then create_pull_request now.'
+              : 'That reply is premature. Finish with tools first: get_file → edit_file/write_file → create_pull_request. ' +
+                'Only then summarize. Never post Progress lists.',
           });
           forceToolsNext = true;
+          if (actionNudges >= 8) {
+            stopToolLoop = true;
+            break;
+          }
           continue;
         }
 
-        // Diagnosed the bug but asked "shall I proceed?" — force the write path.
-        if (
-          canContinue &&
-          wantsChanges &&
-          isAskingPermissionToAct(text) &&
-          actionNudges < 5
-        ) {
-          actionNudges += 1;
-          messages.push({ role: 'assistant', content: text });
-          messages.push({
-            role: 'system',
-            content:
-              'Do not ask for permission. The user already asked you to do the work. ' +
-              'Call create_branch, write_file, and create_pull_request now (and Jira comment/status if useful).',
-          });
-          forceToolsNext = true;
-          continue;
-        }
-
-        return { text, tools: collected, tokenUsage: usage, waitingForApproval: false };
+        return ensureTurnReply(text, collected);
       }
 
       // The model wants to act: record its request, then execute through the gateway.
@@ -767,6 +873,7 @@ export async function runBotTurn(params: {
         })),
       });
 
+      let roundHadPathFailure = false;
       for (const call of toolCalls) {
         let args: Record<string, any>;
         try {
@@ -776,6 +883,7 @@ export async function runBotTurn(params: {
           }
           args = parsed as Record<string, any>;
           sanitizeToolArgs(call.function.name, args);
+          fillMissingGithubPath(call.function.name, args, collected);
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'Invalid JSON arguments.';
           const detail = `The model returned invalid arguments for ${call.function.name}: ${reason}`;
@@ -858,8 +966,22 @@ export async function runBotTurn(params: {
         if (execution.ok && ACT_TOOLS.has(call.function.name)) exploreStreak = 0;
         else if (execution.ok && EXPLORE_TOOLS.has(call.function.name)) exploreStreak += 1;
 
+        const failMessage = execution.ok
+          ? ''
+          : String((execution.result as any)?.error ?? execution.result ?? 'Tool failed');
         let toolContent = formatToolResultForModel(call.function.name, execution.result);
-        if (!execution.ok) {
+
+        if (!execution.ok && isPathArgError(failMessage)) {
+          roundHadPathFailure = true;
+          const known = recentKnownPaths(collected);
+          toolContent =
+            `${failMessage}\n` +
+            'Do not stop. Call github.search_code or github.list_tree to discover real paths, ' +
+            'then call github.get_file with path set to one exact path string from those results.' +
+            (known.length
+              ? `\nPaths already known this turn (pick one): ${known.slice(0, 12).join(', ')}`
+              : '');
+        } else if (!execution.ok) {
           toolContent +=
             '\nRetry with corrected arguments if needed (paths must be clean repo-relative paths, no braces). ' +
             'Then continue until the user request is finished.';
@@ -872,6 +994,26 @@ export async function runBotTurn(params: {
           tool_call_id: call.id,
           content: toolContent,
         });
+      }
+
+      // Recover from missing/invalid path instead of ending the turn on that error.
+      if (
+        !stopToolLoop &&
+        roundHadPathFailure &&
+        pathRecoveryNudges < 4 &&
+        round < MAX_TOOL_ROUNDS - 1
+      ) {
+        pathRecoveryNudges += 1;
+        const known = recentKnownPaths(collected);
+        messages.push({
+          role: 'system',
+          content: known.length
+            ? `Your last get_file/edit used a bad path. Call get_file again with path set to one of: ${known
+                .slice(0, 12)
+                .join(', ')}. Then edit_file / create_pull_request.`
+            : 'Your last get_file used a bad or missing path. Call github.search_code or github.list_tree now, then get_file with a real path. Do not reply yet.',
+        });
+        forceToolsNext = true;
       }
 
       // A round where every tool was unavailable or disabled gained nothing.
@@ -887,9 +1029,7 @@ export async function runBotTurn(params: {
         messages.push({
           role: 'system',
           content:
-            'You have listed enough paths. Read the specific files you need with get_file if you have not, then act ' +
-            '(write_file, create_branch, create_pull_request, update/comment/transition, or answer). ' +
-            'Do not claim you cannot see code if get_file already returned content.',
+            'You have listed enough paths. get_file the ones you need, then edit_file / write_file and create_pull_request. Do not claim you cannot see code if get_file already returned content.',
         });
         exploreStreak = 0;
         forceToolsNext = true;
@@ -908,9 +1048,7 @@ export async function runBotTurn(params: {
         messages.push({
           role: 'system',
           content:
-            'You have file/ticket context. Next call tools that apply the change ' +
-            '(create_branch, write_file, delete_file, create_pull_request, or Jira update/comment/status). ' +
-            'Do not reply to the user until those tools have run or a tool error blocks you. Never post Progress lists.',
+            'You have file/ticket context. Apply the change now with github.edit_file (preferred) or write_file, then create_pull_request. Do not reply until that succeeds or a tool truly blocks you.',
         });
         forceToolsNext = true;
       }
@@ -953,6 +1091,7 @@ export async function runBotTurn(params: {
       .filter(Boolean)
       .join('\n\n');
     const slimHistory = messages.filter((m) => m.role === 'system' || m.role === 'user').slice(0, 4);
+    const unfinished = wantsChanges && !turnHasAction(collected);
     const finalMessages: ChatMessage[] = [
       ...slimHistory,
       {
@@ -960,7 +1099,9 @@ export async function runBotTurn(params: {
         content:
           'You cannot call any more tools. Write a clear short reply for the user. ' +
           'No JSON, no XML, no code dumps, no "Progress:" lists. ' +
-          'Say what changed (or what blocked you) in plain language.\n\n' +
+          (unfinished
+            ? 'The change was not fully applied. Say exactly what you completed and the single blocker that stopped you. Tell them to say continue if they want you to resume.\n\n'
+            : 'Say what changed (or what blocked you) in plain language.\n\n') +
           `Outcomes:\n${toolDigest}` +
           (recentReads ? `\n\nKey excerpts you already read:\n${recentReads}` : ''),
       },
@@ -989,19 +1130,12 @@ export async function runBotTurn(params: {
       } catch {
         // no JSON body
       }
-      if (collected.length > 0) {
-        return {
-          text: userFacingOutcome(collected),
-          tools: collected,
-          tokenUsage: usage,
-          waitingForApproval: false,
-        };
-      }
       return {
-        tools: collected,
+        ...ensureTurnReply(undefined, collected, {
+          kind: 'http',
+          message: `Gateway returned ${finalRes.status}${detail}`,
+        }),
         tokenUsage: usage,
-        waitingForApproval: false,
-        error: { kind: 'http', message: `Gateway returned ${finalRes.status}${detail}` },
       };
     }
 
@@ -1015,36 +1149,18 @@ export async function runBotTurn(params: {
     }
 
     const finalText = stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? '');
-    if (
-      finalText.trim() &&
-      !contentLooksLikeToolMarkup(finalText) &&
-      !/^here is what i got so far:/i.test(finalText.trim()) &&
-      !/^progress:/i.test(finalText.trim())
-    ) {
-      return { text: finalText, tools: collected, tokenUsage: usage, waitingForApproval: false };
-    }
-
-    if (collected.length > 0) {
-      return {
-        text: userFacingOutcome(collected),
-        tools: collected,
-        tokenUsage: usage,
-        waitingForApproval: false,
-      };
-    }
-
-    return {
-      tools: collected,
-      tokenUsage: usage,
-      waitingForApproval: false,
-      error: {
-        kind: 'bad_response',
-        message: 'No answer was produced. Try rephrasing the request.',
-      },
-    };
+    const safeFinal =
+      finalText.trim() && !contentLooksLikeToolMarkup(finalText) ? finalText : undefined;
+    return { ...ensureTurnReply(safeFinal, collected), tokenUsage: usage };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { tools: collected, tokenUsage: usage, waitingForApproval: false, error: { kind: 'network', message: `Could not reach the gateway: ${message}` } };
+    return {
+      ...ensureTurnReply(undefined, collected, {
+        kind: 'network',
+        message: `Could not reach the gateway: ${message}`,
+      }),
+      tokenUsage: usage,
+    };
   }
 }
 

@@ -346,6 +346,27 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
       await refreshData();
     } catch (err) {
       console.error('Failed to send message:', err);
+      // Long turns can outlive the browser wait while the server still finishes.
+      // Reload the thread so a late reply / tool trail is not lost.
+      try {
+        const latest = await api.getMessages(conversationId);
+        if (selectedConversationIdRef.current === conversationId && latest.length > 0) {
+          setMessages(latest.filter((m) => m.conversationId === conversationId));
+          const finished = latest.some(
+            (m) =>
+              m.senderType === 'bot' &&
+              m.type === 'text' &&
+              new Date(m.timestamp).getTime() >= new Date(optimisticMsg.timestamp).getTime()
+          );
+          if (finished) {
+            showToast('Reply arrived after a slow turn', 'info');
+            await refreshData();
+            return;
+          }
+        }
+      } catch {
+        // fall through to the normal error path
+      }
       showToast('Error communicating with bot', 'warning');
       if (selectedConversationIdRef.current === conversationId) {
         setMessages((prev) => prev.filter((m) => m.id !== optimisticMsg.id));
