@@ -1,3 +1,3 @@
-# Hello from Juttler!
+# Hello
 
-This is a simple hello file added to the repository.
+This is a simple hello.md file added to the repository.
