@@ -61,7 +61,7 @@ router.get('/conversations/:id/messages', asyncHandler(async (req: Request, res:
 }));
 
 router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
-  const { conversationId, userId: requestedUserId, messageContent, targetBotId } = req.body;
+  const { conversationId, userId: requestedUserId, messageContent, targetBotId, reasoningMode } = req.body;
   const userId = req.user!.id;
 
   if (!conversationId || !messageContent) {
@@ -133,6 +133,9 @@ router.post('/chat', asyncHandler(async (req: Request, res: Response) => {
     messageContent,
     history,
     conversationId,
+    reasoningMode: ['think', 'big_brain', 'off'].includes(String(req.body.reasoningMode))
+      ? req.body.reasoningMode
+      : undefined,
   });
 
   // Persist the real tool activity so the thread shows what actually happened

@@ -237,11 +237,13 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose, onOpe
         aiProvider,
         aiEndpoint: endpoint,
         aiModel: aiModel.trim(),
-        ...(removeSavedApiKey
-          ? { aiApiKey: null }
-          : apiKey.trim()
-            ? { aiApiKey: apiKey.trim() }
-            : {}),
+        ...(aiProvider === 'free_endpoint'
+          ? {}
+          : removeSavedApiKey
+            ? { aiApiKey: null }
+            : apiKey.trim()
+              ? { aiApiKey: apiKey.trim() }
+              : {}),
       });
       await refreshData();
       setApiKey('');
@@ -447,7 +449,55 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose, onOpe
         <div className={sectionClasses}>AI provider</div>
 
         <div className="px-3 space-y-3.5">
-          <div>
+          <label
+            className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2.5 text-xs ${
+              aiProvider === 'free_endpoint'
+                ? isDark
+                  ? 'border-purple-500/50 bg-purple-500/10'
+                  : 'border-purple-600/40 bg-purple-50'
+                : isDark
+                  ? 'border-[#2f3336] bg-[#0e0f12]'
+                  : 'border-[#e5e7eb] bg-[#f8f9fa]'
+            }`}
+          >
+            <span>
+              Use Free Model endpoint
+              <span className={`mt-0.5 block font-normal ${isDark ? 'text-[#8b9299]' : 'text-[#536471]'}`}>
+                Connect without selecting a model or adding an API key.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={aiProvider === 'free_endpoint'}
+              onChange={(event) => {
+                setAiProvider(event.target.checked ? 'free_endpoint' : 'kilo_gateway');
+                setModels([]);
+                setSyncNote(null);
+                setVerifyResult(null);
+                if (event.target.checked) {
+                  setApiKey('');
+                  setRemoveSavedApiKey(false);
+                }
+              }}
+              className="h-4 w-4 accent-purple-500"
+            />
+          </label>
+
+          {aiProvider === 'free_endpoint' && (
+            <div
+              className={`rounded-xl border px-3 py-2.5 text-[10px] ${
+                isDark
+                  ? 'border-[#2f3336] bg-[#121418] text-[#8b9299]'
+                  : 'border-[#e5e7eb] bg-[#f8f9fa] text-[#536471]'
+              }`}
+            >
+              <p className="font-mono break-all">{endpoint}</p>
+              <p className="mt-1.5">
+                Your message and conversation context will be sent to this external service.
+              </p>
+            </div>
+          )}
+          <div className={aiProvider === 'free_endpoint' ? 'hidden' : ''}>
             <label className={labelClasses}>Provider</label>
             <div className="relative">
               <Server className={`pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 ${isDark ? 'text-[#71767b]' : 'text-[#8b98a5]'}`} />
@@ -462,16 +512,18 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose, onOpe
                 }}
                 className={`${inputClasses} pl-9 cursor-pointer appearance-none`}
               >
-                {Object.entries(AI_PROVIDERS).map(([key, cfg]) => (
-                  <option key={key} value={key}>
-                    {cfg.label}
-                  </option>
-                ))}
+                {Object.entries(AI_PROVIDERS)
+                  .filter(([key]) => key !== 'free_endpoint')
+                  .map(([key, cfg]) => (
+                    <option key={key} value={key}>
+                      {cfg.label}
+                    </option>
+                  ))}
               </select>
             </div>
           </div>
 
-          <div>
+          <div className={aiProvider === 'free_endpoint' ? 'hidden' : ''}>
             <label className={labelClasses}>Endpoint URL</label>
             <div
               className={`w-full rounded-xl border px-3 py-2 text-[11px] font-mono truncate ${
@@ -486,7 +538,7 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose, onOpe
             </p>
           </div>
 
-          <div>
+          <div className={aiProvider === 'free_endpoint' ? 'hidden' : ''}>
             <label className={labelClasses}>Model</label>
             <div className="flex items-center space-x-2">
               <div className="relative flex-1 min-w-0">
@@ -546,7 +598,7 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose, onOpe
             )}
           </div>
 
-          <div>
+          <div className={aiProvider === 'free_endpoint' ? 'hidden' : ''}>
             <label className={labelClasses}>API key</label>
             <div className="relative">
               <KeyRound className={`pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 ${isDark ? 'text-[#71767b]' : 'text-[#8b98a5]'}`} />

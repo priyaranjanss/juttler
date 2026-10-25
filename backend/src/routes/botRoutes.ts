@@ -70,6 +70,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     aiEndpoint,
     aiModel,
     aiApiKey,
+    reasoningMode,
   } = req.body;
   if (!name || !roleTitle) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -127,6 +128,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
     aiApiKey,
     isTeamBot,
     teamId,
+    reasoningMode: ['think', 'big_brain', 'off'].includes(reasoningMode) ? reasoningMode : 'off',
   });
 
   res.json(toPublicBot(newBot));
@@ -202,7 +204,7 @@ router.post('/:id/verify-ai', asyncHandler(async (req: Request, res: Response) =
   const { apiKey, endpoint, provider, model } = req.body as {
     apiKey?: string;
     endpoint?: string;
-    provider?: string;
+    provider?: Bot['aiProvider'];
     model?: string;
   };
 
@@ -222,11 +224,12 @@ router.post('/:id/verify-ai', asyncHandler(async (req: Request, res: Response) =
     return res.status(400).json({ ok: false, message: 'Endpoint does not match the selected AI provider' });
   }
 
+  const selectedProvider = provider || bot.aiProvider;
   const key = apiKey?.trim() || bot.aiApiKey;
-  if (!key) {
+  if (selectedProvider !== 'free_endpoint' && !key) {
     return res.status(400).json({ ok: false, message: 'Add this bot’s API key first.' });
   }
-  const result = await verifyAiConfig(key, expectedEndpoint, model ?? bot.aiModel);
+  const result = await verifyAiConfig(key || '', expectedEndpoint, model ?? bot.aiModel, selectedProvider);
   res.json(result);
 }));
 
@@ -249,6 +252,13 @@ router.post('/models', asyncHandler(async (req: Request, res: Response) => {
   }
   if (requestedEndpoint && requestedEndpoint !== endpoint) {
     return res.status(400).json({ ok: false, models: [], message: 'Endpoint does not match the selected AI provider' });
+  }
+  if (provider === 'free_endpoint') {
+    return res.json({
+      ok: true,
+      models: [],
+      message: 'This endpoint does not require model selection.',
+    });
   }
   const key = typeof apiKey === 'string' && apiKey.trim() ? apiKey.trim() : bot?.aiApiKey;
   if (!key) {

@@ -11,6 +11,7 @@ export interface User {
 }
 
 export type BotStatus = 'idle' | 'working' | 'waiting_approval';
+export type ReasoningMode = 'think' | 'big_brain' | 'off';
 
 // Provider registry keys. Adding an entry here surfaces it in the bot settings
 // dropdown; the endpoint is derived from the provider, never typed by hand.
@@ -18,6 +19,10 @@ export const AI_PROVIDERS = {
   kilo_gateway: {
     label: 'Kilo Gateway',
     endpoint: 'https://api.kilo.ai/api/gateway',
+  },
+  free_endpoint: {
+    label: 'Free Model Endpoint',
+    endpoint: 'https://allaitools-generate.freemodels.workers.dev/api/chat',
   },
 } as const;
 
@@ -47,6 +52,8 @@ export interface Bot {
   publishedAt?: string | null;
   jiraProject?: string | null;
   githubRepos?: string[];
+  /** Grok-style reasoning mode for this bot. */
+  reasoningMode?: ReasoningMode;
   createdAt: string;
   updatedAt: string;
 }

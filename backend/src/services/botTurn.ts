@@ -105,6 +105,8 @@ export interface RunTurnOptions {
   conversationId?: string;
   /** Extra system instructions for this turn only. */
   systemAddendum?: string;
+  /** Grok-style reasoning mode for this turn. */
+  reasoningMode?: 'think' | 'big_brain' | 'off';
 }
 
 /**
@@ -360,6 +362,7 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     ]
       .filter(Boolean)
       .join('\n\n'),
+    reasoningMode: options.reasoningMode,
   });
 
   return {

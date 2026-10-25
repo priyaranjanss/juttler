@@ -1,4 +1,5 @@
 import { Bot, Message } from '../types';
+import { AI_PROVIDERS } from '../constants';
 import { AUTONOMY_RULES } from '../config/autonomy';
 import {
   contentLooksLikeToolMarkup,
@@ -21,6 +22,7 @@ function resolveModel(bot: Bot): string | null {
  * the stored OAuth credentials and never touches an LLM key.
  */
 export interface LlmWiring {
+  provider: Bot['aiProvider'];
   endpoint: string;
   apiKey: string;
   model: string;
@@ -33,6 +35,8 @@ export type LlmGap = 'ok' | 'no_key' | 'no_model' | 'no_key_or_model';
  * blaming "the API key" when it is really an unselected model.
  */
 export function describeLlmGap(bot: Bot): LlmGap {
+  if (bot.aiProvider === 'free_endpoint') return 'ok';
+
   const hasKey = Boolean(bot.aiApiKey?.trim());
   const hasModel = Boolean(bot.aiModel?.trim());
 
@@ -43,11 +47,22 @@ export function describeLlmGap(bot: Bot): LlmGap {
 }
 
 export function resolveLlmWiring(bot: Bot): LlmWiring | null {
+  if (bot.aiProvider === 'free_endpoint') {
+    return {
+      provider: 'free_endpoint',
+      endpoint: AI_PROVIDERS.free_endpoint.endpoint,
+      apiKey: '',
+      model: '',
+    };
+  }
+
   const apiKey = bot.aiApiKey?.trim();
   const model = resolveModel(bot);
   if (!apiKey || !model || !bot.aiEndpoint?.trim()) return null;
-  return { endpoint: bot.aiEndpoint, apiKey, model };
+  return { provider: bot.aiProvider, endpoint: bot.aiEndpoint, apiKey, model };
 }
+
+export type ReasoningMode = 'think' | 'big_brain' | 'off';
 
 export type AiErrorKind = 'not_configured' | 'http' | 'network' | 'bad_response';
 
@@ -87,6 +102,8 @@ export interface TurnResult {
   tools: ToolEvent[];
   // True when the turn stopped to wait for a human approval.
   waitingForApproval: boolean;
+  /** Which reasoning mode produced this reply, for the UI to display. */
+  reasoningMode?: ReasoningMode;
 }
 
 // OpenAI-compatible chat completion response (only the fields we read).
@@ -359,6 +376,10 @@ function buildSystemPrompt(bot: Bot, userName: string, tools: BotToolSpec[]): st
   return `${bot.systemPrompt}\nUser Name: ${userName}. You are participating in workspace chat as ${bot.name} (${bot.roleTitle}). Keep responses concise, actionable, and aligned with your role.\n\n${AUTONOMY_RULES}${buildToolCapabilityContext(tools)}`;
 }
 
+function buildBotIdentityInstructions(bot: Bot): string {
+  return `Authoritative bot identity: You are ${bot.name}, serving as ${bot.roleTitle}. Speak in this bot's configured persona and describe this bot's responsibilities when asked. Do not identify yourself as the underlying AI model, model vendor, or a different assistant. If asked which model you are, say you are ${bot.name} and that the underlying model is not specified.`;
+}
+
 function buildInitialMessages(
   bot: Bot,
   userName: string,
@@ -374,7 +395,11 @@ function buildInitialMessages(
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content: systemAddendum ? `${base}\n\n${systemAddendum}` : base,
+      content: [
+        base,
+        buildBotIdentityInstructions(bot),
+        systemAddendum,
+      ].filter(Boolean).join('\n\n'),
     },
   ];
 
@@ -642,6 +667,148 @@ async function fetchGateway(url: string, init: RequestInit): Promise<Response> {
   }
 }
 
+const FREE_ENDPOINT_HEADERS = {
+  'Content-Type': 'application/json',
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36',
+  Origin: 'https://rusherai.com',
+  Referer: 'https://rusherai.com/',
+  Accept: '*/*',
+};
+
+function toFreeEndpointMessages(
+  messages: ChatMessage[]
+): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+  const toolNames = new Map<string, string>();
+  return messages.map((message) => {
+    if (message.role === 'system') {
+      return {
+        role: 'user',
+        content: `Instructions for this bot. Follow these while answering the user's messages:\n${message.content || ''}`,
+      };
+    }
+
+    if (message.role === 'tool') {
+      const toolName = toolNames.get(message.tool_call_id || '') || 'tool';
+      return {
+        role: 'user',
+        content: `Result from ${toolName}:\n${message.content || ''}`,
+      };
+    }
+
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      for (const call of message.tool_calls) toolNames.set(call.id, call.function.name);
+      const requestedTools = message.tool_calls
+        .map((call) => `${call.function.name}(${call.function.arguments})`)
+        .join('\n');
+      return {
+        role: 'assistant',
+        content: [message.content, `Requested tools:\n${requestedTools}`].filter(Boolean).join('\n'),
+      };
+    }
+
+    return { role: message.role, content: message.content || '' };
+  });
+}
+
+interface CompletionRequestOptions {
+  maxTokens: number;
+  temperature: number;
+  tools?: BotToolSpec[];
+  toolChoice?: 'auto' | 'required';
+  reasoningEffort?: string;
+}
+
+async function fetchCompletion(
+  wiring: LlmWiring,
+  messages: ChatMessage[],
+  options: CompletionRequestOptions
+): Promise<Response> {
+  if (wiring.provider === 'free_endpoint') {
+    return fetchGateway(wiring.endpoint, {
+      method: 'POST',
+      headers: FREE_ENDPOINT_HEADERS,
+      body: JSON.stringify({
+        messages: toFreeEndpointMessages(messages),
+        stream: false,
+      }),
+    });
+  }
+
+  return fetchGateway(`${wiring.endpoint.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${wiring.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: wiring.model,
+      messages,
+      ...(options.tools?.length
+        ? {
+            tools: toOpenAiTools(options.tools),
+            tool_choice: options.toolChoice ?? 'auto',
+          }
+        : {}),
+      ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
+      max_tokens: options.maxTokens,
+      temperature: options.temperature,
+    }),
+  });
+}
+
+async function readCompletionResponse(response: Response): Promise<ChatCompletionResponse> {
+  const responseText = await response.text();
+  if (response.headers.get('content-type')?.includes('text/event-stream')) {
+    const content: string[] = [];
+    let usage: ChatCompletionResponse['usage'];
+
+    for (const line of responseText.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') continue;
+
+      try {
+        const event = JSON.parse(data) as {
+          choices?: Array<{
+            message?: { content?: unknown };
+            delta?: { content?: unknown };
+          }>;
+          usage?: ChatCompletionResponse['usage'];
+        };
+        const choice = event.choices?.[0];
+        const text = choice?.message?.content ?? choice?.delta?.content;
+        if (typeof text === 'string') content.push(text);
+        if (event.usage) usage = event.usage;
+      } catch {
+        content.push(data);
+      }
+    }
+
+    if (content.length === 0) {
+      throw new Error('Endpoint returned an empty streaming response.');
+    }
+    return { choices: [{ message: { content: content.join('') } }], usage };
+  }
+
+  let result: unknown;
+  try {
+    result = JSON.parse(responseText);
+  } catch {
+    throw new Error('Endpoint returned invalid JSON.');
+  }
+  if (!result || typeof result !== 'object') {
+    throw new Error('Endpoint returned an unsupported response format.');
+  }
+
+  const completion = result as ChatCompletionResponse & { content?: unknown };
+  if (Array.isArray(completion.choices)) return completion;
+  if (typeof completion.content === 'string') {
+    return { choices: [{ message: { content: completion.content } }] };
+  }
+  throw new Error('Endpoint returned an unsupported response format.');
+}
+
 /**
  * Runs one bot turn against its configured gateway, executing any tools the
  * model asks for through `executor` (the Tool Gateway).
@@ -661,6 +828,8 @@ export async function runBotTurn(params: {
   systemAddendum?: string;
   /** Issue keys resolved from this message + thread (ICS-9, bare "9", continue). */
   contextIssueKeys?: string[];
+  /** Grok-style reasoning mode: think / big_brain / off. */
+  reasoningMode?: ReasoningMode;
 }): Promise<TurnResult> {
   const { bot, tools, executor } = params;
   const contextIssueKeys = params.contextIssueKeys ?? [];
@@ -690,7 +859,14 @@ export async function runBotTurn(params: {
   }
 
   const model = wiring.model;
-  const url = `${wiring.endpoint.replace(/\/+$/, '')}/chat/completions`;
+  const usesFreeEndpoint = wiring.provider === 'free_endpoint';
+  const url = usesFreeEndpoint
+    ? wiring.endpoint
+    : `${wiring.endpoint.replace(/\/+$/, '')}/chat/completions`;
+  const freeEndpointToolInstructions =
+    usesFreeEndpoint && tools.length > 0
+      ? 'This endpoint does not support structured function calls. When you need a tool, emit exactly one block in this format: <tool_call>{"name":"EXACT_TOOL_NAME","arguments":{"argument":"value"}}</tool_call>. Use only the exact tool names listed above, and wait for the tool result before continuing.'
+      : '';
   const messages = buildInitialMessages(
     bot,
     params.userName,
@@ -698,7 +874,7 @@ export async function runBotTurn(params: {
     params.history,
     params.messageContent,
     params.overrideSystemPrompt,
-    params.systemAddendum
+    [params.systemAddendum, freeEndpointToolInstructions].filter(Boolean).join('\n\n') || undefined
   );
 
   const collected: ToolEvent[] = [];
@@ -716,6 +892,14 @@ export async function runBotTurn(params: {
   let pathRecoveryNudges = 0;
   const wantsChanges = userAskedForChanges(params.messageContent, params.history);
   const turnStartedAt = Date.now();
+
+  // Grok-style reasoning modes map to OpenAI-compatible reasoning_effort.
+  // think = medium, big_brain = high, off = none. The gateway decides how
+  // much extra compute that costs; we just ask and report what we got.
+  const reasoningMode = params.reasoningMode ?? 'off';
+  const reasoningEffort =
+    reasoningMode === 'big_brain' ? 'high' :
+    reasoningMode === 'think' ? 'medium' : undefined;
 
   try {
     for (let round = 0; round < MAX_TOOL_ROUNDS && !stopToolLoop; round++) {
@@ -740,7 +924,15 @@ export async function runBotTurn(params: {
         break;
       }
 
-      const res = await fetchGateway(url, {
+      const res = usesFreeEndpoint
+        ? await fetchCompletion(wiring, messages, {
+            tools,
+            toolChoice: toolChoiceFor(round, tools, params.messageContent, forceToolsNext),
+            reasoningEffort,
+            maxTokens: tools.length > 0 ? 8192 : 2048,
+            temperature: tools.length > 0 ? 0.2 : 0.7,
+          })
+        : await fetchGateway(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -755,6 +947,9 @@ export async function runBotTurn(params: {
                 tool_choice: toolChoiceFor(round, tools, params.messageContent, forceToolsNext),
               }
             : {}),
+          // Grok-style reasoning: think = medium, big_brain = high, off = none.
+          // The gateway maps this to its own reasoning budget.
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
           // write_file payloads need headroom; low caps yield empty / truncated tool calls.
           max_tokens: tools.length > 0 ? 8192 : 2048,
           temperature: tools.length > 0 ? 0.2 : 0.7,
@@ -772,16 +967,18 @@ export async function runBotTurn(params: {
         }
         const hint =
           res.status === 401 || res.status === 403
-            ? ' (check the bot API key in bot settings)'
+            ? usesFreeEndpoint ? '' : ' (check the bot API key in bot settings)'
             : res.status === 402 || res.status === 503
               ? ' (gateway reports insufficient balance)'
               : res.status === 429
                 ? ' (rate limited â€” try again shortly)'
                 : '';
-        return { tools: collected, waitingForApproval: false, error: { kind: 'http', message: `Gateway returned ${res.status}${detail}${hint}` } };
+        return { tools: collected, waitingForApproval: false, error: { kind: 'http', message: `${usesFreeEndpoint ? 'Endpoint' : 'Gateway'} returned ${res.status}${detail}${hint}` } };
       }
 
-      const data = (await res.json()) as ChatCompletionResponse;
+      const data = usesFreeEndpoint
+        ? await readCompletionResponse(res)
+        : ((await res.json()) as ChatCompletionResponse);
       if (data.usage) {
         usage = {
           promptTokens: data.usage.prompt_tokens ?? 0,
@@ -1158,7 +1355,13 @@ export async function runBotTurn(params: {
       { role: 'user', content: params.messageContent },
     ];
 
-    const finalRes = await fetchGateway(url, {
+    const finalRes = usesFreeEndpoint
+      ? await fetchCompletion(wiring, finalMessages, {
+          maxTokens: 1500,
+          temperature: 0.3,
+          reasoningEffort,
+        })
+      : await fetchGateway(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1169,6 +1372,7 @@ export async function runBotTurn(params: {
         messages: finalMessages,
         max_tokens: 1500,
         temperature: 0.3,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       }),
     });
 
@@ -1183,13 +1387,15 @@ export async function runBotTurn(params: {
       return {
         ...ensureTurnReply(undefined, collected, {
           kind: 'http',
-          message: `Gateway returned ${finalRes.status}${detail}`,
+          message: `${usesFreeEndpoint ? 'Endpoint' : 'Gateway'} returned ${finalRes.status}${detail}`,
         }),
         tokenUsage: usage,
       };
     }
 
-    const finalData = (await finalRes.json()) as ChatCompletionResponse;
+    const finalData = usesFreeEndpoint
+      ? await readCompletionResponse(finalRes)
+      : ((await finalRes.json()) as ChatCompletionResponse);
     if (finalData.usage) {
       usage = {
         promptTokens: finalData.usage.prompt_tokens ?? 0,
@@ -1201,13 +1407,13 @@ export async function runBotTurn(params: {
     const finalText = stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? '');
     const safeFinal =
       finalText.trim() && !contentLooksLikeToolMarkup(finalText) ? finalText : undefined;
-    return { ...ensureTurnReply(safeFinal, collected), tokenUsage: usage };
+    return { ...ensureTurnReply(safeFinal, collected), tokenUsage: usage, reasoningMode };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
       ...ensureTurnReply(undefined, collected, {
         kind: 'network',
-        message: `Could not reach the gateway: ${message}`,
+        message: `Could not reach the ${usesFreeEndpoint ? 'endpoint' : 'gateway'}: ${message}`,
       }),
       tokenUsage: usage,
     };
@@ -1221,12 +1427,43 @@ export async function runBotTurn(params: {
 export async function verifyAiConfig(
   apiKey: string,
   endpoint: string,
-  model?: string
+  model?: string,
+  provider: Bot['aiProvider'] = 'kilo_gateway'
 ): Promise<{
   ok: boolean;
   message: string;
   status?: number;
 }> {
+  if (provider === 'free_endpoint') {
+    try {
+      const response = await fetchCompletion(
+        {
+          provider,
+          endpoint: AI_PROVIDERS.free_endpoint.endpoint,
+          apiKey: '',
+          model: '',
+        },
+        [{ role: 'user', content: 'ping' }],
+        { maxTokens: 1, temperature: 0 }
+      );
+      if (!response.ok) {
+        return {
+          ok: false,
+          message: `Verification failed (${response.status}).`,
+          status: response.status,
+        };
+      }
+      const result = await readCompletionResponse(response);
+      if (typeof result.choices?.[0]?.message?.content !== 'string') {
+        return { ok: false, message: 'Endpoint returned no chat response.', status: response.status };
+      }
+      return { ok: true, message: 'Free Model Endpoint verified — this bot can chat.', status: response.status };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, message: `Could not reach the endpoint: ${message}` };
+    }
+  }
+
   const trimmedKey = apiKey.trim();
   if (!trimmedKey) {
     return { ok: false, message: 'Enter an API key first.' };

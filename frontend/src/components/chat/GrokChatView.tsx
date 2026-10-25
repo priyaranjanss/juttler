@@ -111,7 +111,7 @@ const ThinkingIndicator: React.FC<{ bot?: Bot; isDark: boolean }> = ({ bot, isDa
       </div>
     </div>
   );
-};
+}
 
 // The Chief of Staff hands work to specialists with this tool; the chat renders
 // it as a delegation card rather than a raw tool call.
@@ -138,10 +138,7 @@ interface GrokChatViewProps {
   onRequestPlugin: (slug?: string) => void;
 }
 
-export const GrokChatView: React.FC<GrokChatViewProps> = ({
-  onToggleSettings,
-  onRequestPlugin,
-}) => {
+export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatViewProps) => {
   const {
     currentUser,
     bots,
@@ -178,6 +175,7 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
   // Plugin @ mention in the composer
   const [isPluginMentionOpen, setIsPluginMentionOpen] = useState(false);
   const [pluginMention, setPluginMention] = useState('');
+  const [reasoningMode, setReasoningMode] = useState<'think' | 'big_brain' | 'off'>('off');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -334,6 +332,7 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
         userId: currentUser.id,
         messageContent: textToSend,
         targetBotId: activeBotInThread?.id,
+        reasoningMode,
       });
 
       if (selectedConversationIdRef.current === conversationId) {
@@ -811,15 +810,20 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
                       ) : null}
                     </div>
 
-                    <pre
-                      className={`overflow-x-auto rounded-xl border p-2.5 font-mono text-[10px] max-h-56 ${
-                        isDark ? 'border-[#26292d] bg-black text-[#e7e9ea]' : 'border-[#e5e7eb] bg-white text-[#0f1419]'
-                      }`}
-                    >
-                      {typeof msg.metadata.toolResult.result === 'object'
-                        ? JSON.stringify(msg.metadata.toolResult.result, null, 2)
-                        : String(msg.metadata.toolResult.result ?? '')}
-                    </pre>
+                    {/* Render images for image-generation tools */}
+                    {msg.metadata.toolResult.toolName?.startsWith('image-generation.') ? (
+                      renderImageResult(msg.metadata.toolResult.result, isDark)
+                    ) : (
+                      <pre
+                        className={`overflow-x-auto rounded-xl border p-2.5 font-mono text-[10px] max-h-56 ${
+                          isDark ? 'border-[#26292d] bg-black text-[#e7e9ea]' : 'border-[#e5e7eb] bg-white text-[#0f1419]'
+                        }`}
+                      >
+                        {typeof msg.metadata.toolResult.result === 'object'
+                          ? JSON.stringify(msg.metadata.toolResult.result, null, 2)
+                          : String(msg.metadata.toolResult.result ?? '')}
+                      </pre>
+                    )}
                   </div>
                 )}
 
@@ -967,23 +971,73 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
           }`}
         />
         <div
-          className={`flex items-end space-x-2 p-2 px-3 rounded-full border shadow-xl transition-all ${
+          className={`flex flex-col items-end space-x-2 p-2 px-3 rounded-full border shadow-xl transition-all ${
             isDark
               ? 'bg-[#16181c] border-[#26292d] focus-within:border-[#536471]'
               : 'bg-white border-[#e5e7eb] focus-within:border-[#cfd9de]'
           }`}
         >
-          <button
-            onClick={() => showToast('Attachment options open', 'info')}
-            className={`p-2 rounded-full transition shrink-0 ${
-              isDark ? 'text-[#71767b] hover:text-white hover:bg-[#202327]' : 'text-[#536471] hover:text-black hover:bg-[#f0f2f5]'
-            }`}
-            title="Attach files or triggers"
-          >
-            <Plus className="h-5 w-5 stroke-[2.5]" />
-          </button>
+          {/* Reasoning Mode Selector - Grok-style Think/Big Brain */}
+          <div className="flex items-center space-x-1 px-1">
+            {(['off', 'think', 'big_brain'] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setReasoningMode(mode)}
+                className={`flex items-center space-x-1 rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
+                  reasoningMode === mode
+                    ? isDark
+                      ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/30'
+                      : 'bg-[#0f1419] text-white shadow-lg shadow-black/30'
+                    : isDark
+                    ? 'text-[#71767b] hover:text-white hover:bg-[#202327]'
+                    : 'text-[#536471] hover:text-black hover:bg-[#f0f2f5]'
+                }`}
+                title={
+                  mode === 'off'
+                    ? 'Standard'
+                    : mode === 'think'
+                    ? 'Think — deeper reasoning'
+                    : 'Big Brain — maximum reasoning'
+                }
+              >
+                {mode === 'off' && <span>Standard</span>}
+                {mode === 'think' && (
+                  <>
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M9 18V5l12-2v13" />
+                      <circle cx="6" cy="18" r="3" />
+                      <path d="M9 22a5 5 0 0 1-5-5v-2a5 5 0 0 1 5-5h10a5 5 0 0 1 5 5v2a5 5 0 0 1-5 5H9z" />
+                    </svg>
+                    <span>Think</span>
+                  </>
+                )}
+                {mode === 'big_brain' && (
+                  <>
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 2a10 10 0 1 0 10 10" />
+                      <path d="M12 16v-4" />
+                      <path d="M12 8h.01" />
+                      <path d="M8 14s.5-2 4-2 4 2 4 2" />
+                    </svg>
+                    <span>Big Brain</span>
+                  </>
+                )}
+              </button>
+            ))}
+          </div>
 
-          <textarea
+          <div className="flex items-end space-x-2 w-full">
+            <button
+              onClick={() => showToast('Attachment options open', 'info')}
+              className={`p-2 rounded-full transition shrink-0 ${
+                isDark ? 'text-[#71767b] hover:text-white hover:bg-[#202327]' : 'text-[#536471] hover:text-black hover:bg-[#f0f2f5]'
+              }`}
+              title="Attach files or triggers"
+            >
+              <Plus className="h-5 w-5 stroke-[2.5]" />
+            </button>
+
+            <textarea
             ref={textareaRef}
             rows={1}
             value={inputText}
@@ -1017,8 +1071,8 @@ export const GrokChatView: React.FC<GrokChatViewProps> = ({
           </div>
         </div>
       </div>
+      </div>
     </div>
   );
 };
-
 export default GrokChatView;

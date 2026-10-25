@@ -20,6 +20,7 @@ interface BotRow {
   ai_endpoint: string | null;
   ai_model: string | null;
   ai_api_key: string | null;
+  reasoning_mode?: string | null;
   is_team_bot?: boolean;
   team_id?: string | null;
   published_at?: Date | string | null;
@@ -44,7 +45,7 @@ function mapRow(row: BotRow): Bot {
     memoryEnabled: row.memory_enabled,
     aiProvider: (row.ai_provider || 'kilo_gateway') as Bot['aiProvider'],
     aiEndpoint: row.ai_endpoint || 'https://api.kilo.ai/api/gateway',
-    // Empty when unset â€” the user must pick a model in bot settings.
+    // Empty when unset — the user must pick a model in bot settings.
     aiModel: row.ai_model || '',
     aiApiKey: decryptTokenSafe(row.ai_api_key),
     isTeamBot: row.is_team_bot === true,
@@ -52,6 +53,7 @@ function mapRow(row: BotRow): Bot {
     publishedAt: row.published_at ? new Date(row.published_at).toISOString() : null,
     jiraProject: row.jira_project ?? null,
     githubRepos: Array.isArray(row.github_repos) ? row.github_repos.filter((repo) => typeof repo === 'string') : [],
+    reasoningMode: (row.reasoning_mode as Bot['reasoningMode']) || 'off',
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -100,9 +102,10 @@ export async function createBot(data: {
   aiApiKey?: string | null;
   isTeamBot?: boolean;
   teamId?: string | null;
+  reasoningMode?: 'think' | 'big_brain' | 'off';
 }): Promise<Bot> {
   const rows = (await sql`
-    insert into bots (id, user_id, name, role_title, system_prompt, avatar, color, allowed_tools, is_chief_of_staff, memory_enabled, ai_provider, ai_endpoint, ai_model, ai_api_key, is_team_bot, team_id)
+    insert into bots (id, user_id, name, role_title, system_prompt, avatar, color, allowed_tools, is_chief_of_staff, memory_enabled, ai_provider, ai_endpoint, ai_model, ai_api_key, is_team_bot, team_id, reasoning_mode)
     values (
       ${generateId('bot_')},
       ${data.userId},
@@ -119,7 +122,8 @@ export async function createBot(data: {
       ${data.aiModel?.trim() || null},
       ${data.aiApiKey ? encryptToken(data.aiApiKey) : null},
       ${data.isTeamBot === true},
-      ${data.teamId ?? null}
+      ${data.teamId ?? null},
+      ${data.reasoningMode || 'off'}
     )
     returning *
   `) as unknown as BotRow[];
@@ -161,6 +165,7 @@ export async function updateBot(id: string, updates: Record<string, unknown>): P
     aiEndpoint: 'ai_endpoint',
     aiModel: 'ai_model',
     aiApiKey: 'ai_api_key',
+    reasoningMode: 'reasoning_mode',
     jiraProject: 'jira_project',
     githubRepos: 'github_repos',
   };

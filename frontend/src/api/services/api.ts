@@ -142,6 +142,7 @@ export const api = {
     userId: string;
     messageContent: string;
     targetBotId?: string;
+    reasoningMode?: 'think' | 'big_brain' | 'off';
   }): Promise<{ messages: Message[]; activeBot?: Bot; requiresApproval?: boolean }> {
     return request('/chat', jsonBody(data));
   },

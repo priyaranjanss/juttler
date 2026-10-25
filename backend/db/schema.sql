@@ -168,6 +168,10 @@ ALTER TABLE bots ALTER COLUMN ai_model DROP NOT NULL;
 ALTER TABLE bots ALTER COLUMN ai_model DROP DEFAULT;
 ALTER TABLE bots ADD COLUMN IF NOT EXISTS ai_api_key  TEXT;
 
+-- Grok-style reasoning modes: think, big_brain, off
+ALTER TABLE bots ADD COLUMN IF NOT EXISTS reasoning_mode TEXT NOT NULL DEFAULT 'off'
+  CHECK (reasoning_mode IN ('think', 'big_brain', 'off'));
+
 -- ---------------------------------------------------------------------------
 -- Plugins: structured integrations that give Bots access to external services.
 -- A Plugin definition is account-wide (the marketplace catalog). Once a user

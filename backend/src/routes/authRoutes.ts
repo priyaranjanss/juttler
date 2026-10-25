@@ -11,6 +11,7 @@ import {
 import { createBot } from '../repositories/bots';
 import { signAuthToken } from '../config/jwt';
 import { CHIEF_BOT_CONFIG, CHIEF_SYSTEM_PROMPT } from '../config/chiefOfStaff';
+import { GROK_COMPANIONS } from '../config/chiefOfStaff';
 
 const router = Router();
 
@@ -41,6 +42,21 @@ router.post('/register', asyncHandler(async (req: Request, res: Response) => {
     ...CHIEF_BOT_CONFIG,
     systemPrompt: CHIEF_SYSTEM_PROMPT,
   });
+
+  // Create Grok companion personas — Ani, Rudy, Mika, Valentine
+  for (const companion of GROK_COMPANIONS) {
+    await createBot({
+      userId: newUser.id,
+      name: companion.name,
+      roleTitle: companion.roleTitle,
+      systemPrompt: companion.systemPrompt,
+      avatar: companion.avatar,
+      color: companion.color,
+      isChiefOfStaff: false,
+      memoryEnabled: companion.memoryEnabled,
+      allowedTools: [...companion.allowedTools],
+    });
+  }
 
   const token = signAuthToken(newUser.id);
   res.json({ user: toSafeUser(newUser), token });

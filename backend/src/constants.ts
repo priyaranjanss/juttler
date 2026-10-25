@@ -15,6 +15,10 @@ export const AI_PROVIDERS = {
     label: 'Kilo Gateway',
     endpoint: 'https://api.kilo.ai/api/gateway',
   },
+  free_endpoint: {
+    label: 'Free Model Endpoint',
+    endpoint: 'https://allaitools-generate.freemodels.workers.dev/api/chat',
+  },
 } as const;
 
 /** Avatar shapes a bot may use. */

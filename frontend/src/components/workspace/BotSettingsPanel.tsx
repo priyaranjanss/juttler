@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { X, Save, Check } from 'lucide-react';
+import { X, Save, Check, Brain } from 'lucide-react';
 import { api } from '../../services/api';
 import { useApp } from '../../contexts/AppContext';
 import { Bot } from '../../types';
@@ -32,6 +32,7 @@ export const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose
   const [systemPrompt, setSystemPrompt] = useState(bot.systemPrompt);
   const [allowedTools, setAllowedTools] = useState(bot.allowedTools || []);
   const [memoryEnabled, setMemoryEnabled] = useState(bot.memoryEnabled);
+  const [reasoningMode, setReasoningMode] = useState<'think' | 'big_brain' | 'off'>(bot.reasoningMode || 'off');
   const [isSaving, setIsSaving] = useState(false);
   /** Canonical tool ids currently granted to this bot, per plugin. */
   const [grants, setGrants] = useState<Record<string, string[]>>({});
@@ -140,6 +141,7 @@ export const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose
         systemPrompt: systemPrompt.trim(),
         allowedTools,
         memoryEnabled,
+        reasoningMode,
       });
       await refreshData();
       showToast(`${name.trim()} settings saved`, 'success');
@@ -296,6 +298,77 @@ export const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({ bot, onClose
               className="h-4 w-4 accent-purple-500"
             />
           </label>
+
+          {/* Reasoning Mode - Grok-style Think/Big Brain */}
+          <section className="space-y-3">
+            <h3 className="text-xs font-semibold">Reasoning Mode</h3>
+            <div className="space-y-2">
+              {(['off', 'think', 'big_brain'] as const).map((mode) => (
+                <label
+                  key={mode}
+                  className={`flex items-center space-x-3 rounded-xl border px-3 py-2.5 text-xs cursor-pointer transition ${
+                    reasoningMode === mode
+                      ? isDark
+                        ? 'border-purple-500/50 bg-purple-500/10'
+                        : 'border-purple-600/40 bg-purple-50'
+                      : isDark
+                      ? 'border-[#2f3336] bg-[#0e0f12] hover:border-[#3a3f44]'
+                      : 'border-[#e5e7eb] bg-[#f8f9fa] hover:border-[#d1d5db]'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="reasoningMode"
+                    value={mode}
+                    checked={reasoningMode === mode}
+                    onChange={() => setReasoningMode(mode)}
+                    className="sr-only"
+                  />
+                  <div className="flex items-center space-x-2">
+                    {mode === 'off' && (
+                      <svg className="h-5 w-5 text-[#71767b]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" />
+                      </svg>
+                    )}
+                    {mode === 'think' && (
+                      <Brain className="h-5 w-5 text-purple-400" />
+                    )}
+                    {mode === 'big_brain' && (
+                      <svg className="h-5 w-5 text-purple-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M12 2a10 10 0 1 0 10 10" />
+                        <path d="M12 16v-4" />
+                        <path d="M12 8h.01" />
+                        <path d="M8 14s.5-2 4-2 4 2 4 2" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="flex items-center space-x-2">
+                      <span className="font-bold">{mode === 'off' ? 'Standard' : mode === 'think' ? 'Think' : 'Big Brain'}</span>
+                      {mode === 'think' && (
+                        <span className="rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-400 text-[8px] font-bold px-1.5 py-px">
+                          deeper reasoning
+                        </span>
+                      )}
+                      {mode === 'big_brain' && (
+                        <span className="rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-400 text-[8px] font-bold px-1.5 py-px">
+                          maximum reasoning
+                        </span>
+                      )}
+                    </div>
+                    <span className={`mt-0.5 block truncate font-normal ${mutedText}`}>
+                      {mode === 'off'
+                        ? 'Fast responses for simple tasks'
+                        : mode === 'think'
+                        ? 'Deeper reasoning for complex problems'
+                        : 'Maximum reasoning effort for hardest challenges'}
+                    </span>
+                  </div>
+                  {reasoningMode === mode && <Check className="h-4 w-4 shrink-0 text-purple-500" />}
+                </label>
+              ))}
+            </div>
+          </section>
         </div>
 
         <div className={`border-t p-4 ${isDark ? 'border-[#26292d]' : 'border-[#e5e7eb]'}`}>

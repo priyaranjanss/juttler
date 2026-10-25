@@ -21,9 +21,10 @@ export interface User {
   createdAt: string;
 }
 
-export type AiProvider = 'kilo_gateway';
+export type AiProvider = 'kilo_gateway' | 'free_endpoint';
 
 export type BotStatus = 'idle' | 'working' | 'waiting_approval';
+export type ReasoningMode = 'think' | 'big_brain' | 'off';
 
 export interface Bot {
   id: string;
@@ -52,6 +53,8 @@ export interface Bot {
   jiraProject: string | null;
   /** The only GitHub repositories this bot may read or change. */
   githubRepos: string[];
+  /** Grok-style reasoning mode for this bot. */
+  reasoningMode: ReasoningMode;
   createdAt: string;
   updatedAt: string;
 }
