@@ -25,7 +25,7 @@ import {
   markInstallationNeedsReauth,
   updateInstallationAccessToken,
 } from '../repositories/plugins';
-import { isWorkspaceTool, executeWorkspaceTool } from './workspaceTools';
+import { isWorkspaceTool, executeWorkspaceTool } from '../plugins/workspace';
 import { findBotById } from '../repositories/bots';
 import { assertWorkScope } from './workScope';
 

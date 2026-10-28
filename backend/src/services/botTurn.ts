@@ -14,7 +14,7 @@ import { PLUGINS } from '../plugins';
 import { runBotTurn, BotToolSpec, ToolEvent, ToolExecution } from './aiService';
 import { callTool, executeApprovedTool } from './pluginGateway';
 import { buildChiefSystemPrompt, isChiefOfStaffBot, RosterEntry, WorkspaceService } from '../config/chiefOfStaff';
-import { WORKSPACE_TOOLS, isWorkspaceTool, executeWorkspaceTool } from './workspaceTools';
+import { WORKSPACE_TOOLS, isWorkspaceTool, executeWorkspaceTool } from '../plugins/workspace';
 import { describeWorkDesk } from './workScope';
 import { resolveThreadIssueKeys } from './issueKeys';
 import { findSlackAppByBotId } from '../repositories/slackApps';

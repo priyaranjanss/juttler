@@ -55,7 +55,7 @@ export const Markdown: React.FC<MarkdownProps> = ({ content, isDark = false }) =
 
     pre: ({ children }) => (
       <pre
-        className={`my-2 overflow-x-auto rounded-xl border p-3 no-scrollbar ${
+        className={`my-2 overflow-x-auto rounded-lg border p-3 no-scrollbar ${
           isDark ? 'border-[#26292d] bg-black text-[#e7e9ea]' : 'border-[#e5e7eb] bg-[#f7f9f9] text-[#0f1419]'
         }`}
       >

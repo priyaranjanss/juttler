@@ -14,7 +14,7 @@ import {
 } from '../repositories/conversations';
 import { runBotTurn, BotToolSpec } from '../services/aiService';
 import { runBotTurnWithTools, DELEGATE_TOOL, describeWorkspaceTool } from '../services/botTurn';
-import { isWorkspaceTool } from '../services/workspaceTools';
+import { isWorkspaceTool } from '../plugins/workspace';
 import { callTool, executeApprovedTool, resolveApproval } from '../services/pluginGateway';
 import { listBotAvailableTools, findInstallationByUserAndPlugin } from '../repositories/plugins';
 import { generateId } from '../utils/id';

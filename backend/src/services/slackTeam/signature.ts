@@ -10,7 +10,7 @@ export function verifySlackSignature(
   if (!timestamp || !signature || !secret) return false;
 
   const ageSeconds = Math.abs(Date.now() / 1000 - Number(timestamp));
-  if (!Number.isFinite(ageSeconds) || ageSeconds > 60 * 5) return false;
+  if (!Number.isFinite(ageSeconds) || ageSeconds > 60 * 30) return false;
 
   const digest = `v0=${createHmac('sha256', secret).update(`v0:${timestamp}:${rawBody}`).digest('hex')}`;
   const left = Buffer.from(digest);

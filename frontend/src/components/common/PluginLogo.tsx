@@ -53,14 +53,6 @@ export const PluginLogo: React.FC<PluginLogoProps> = ({ slug, size = 24, classNa
         </svg>
       );
 
-    case 'web-search':
-      return (
-        <svg {...common}>
-          <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="#1d9bf0" strokeWidth="2.4" />
-          <path d="M15.4 15.4 21 21" stroke="#1d9bf0" strokeWidth="2.4" strokeLinecap="round" />
-        </svg>
-      );
-
     case 'gmail':
       // Google's four brand colours forming the envelope M
       return (

@@ -2,30 +2,53 @@ import React, { useState } from 'react';
 import { useApp } from '../../contexts/AppContext';
 import { BotBlobAvatar } from '../common/BotBlobAvatar';
 import { Avatar } from '../common/Avatar';
-import { Bot } from '../../types';
+import { Conversation } from '../../types';
 import {
   Search,
   Plus,
   Plug,
   Bot as BotIcon,
   Users,
-  Settings2,
   ChevronDown,
   Sun,
   Moon,
+  LogOut,
 } from 'lucide-react';
 
 interface GrokSidebarProps {
   onOpenCreateBotModal?: () => void;
-  onOpenBotProfile?: (bot: Bot) => void;
   onOpenPlugins?: () => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
 }
 
+/** Short relative time for the row, in the style the reference uses. */
+function formatListTime(iso: string | undefined): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const now = new Date();
+  const startOfDay = (value: Date) =>
+    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const dayDiff = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+
+  if (dayDiff <= 0) {
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+  if (dayDiff === 1) return 'Yesterday';
+  if (dayDiff < 7) return date.toLocaleDateString([], { weekday: 'long' });
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+/** One-line preview of the last message, whitespace collapsed. */
+function previewLine(conversation: Conversation | null, fallback: string): string {
+  const snippet = conversation?.lastMessageSnippet?.replace(/\s+/g, ' ').trim();
+  return snippet || fallback;
+}
+
 export const GrokSidebar: React.FC<GrokSidebarProps> = ({
   onOpenCreateBotModal,
-  onOpenBotProfile,
   onOpenPlugins,
   isCollapsed = false,
 }) => {
@@ -37,7 +60,7 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
     openChatWithBot,
     theme,
     toggleTheme,
-    navigate,
+    logout,
     installedPlugins,
     isWorkspaceLoading,
   } = useApp();
@@ -52,191 +75,190 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
     return null;
   }
 
-  // Search filter: filter bots specifically by bot name as requested.
-  // The Chief of Staff is always pinned first — it is the user's front door.
+  const activeConversation = conversations.find((c) => c.id === selectedConversationId) || null;
+  const activeBotId =
+    activeConversation && !activeConversation.isGroup ? activeConversation.participantBotIds[0] : null;
+
+  // The Chief of Staff is always pinned first. Search matches the bot's name.
   const filteredBots = bots
     .filter((bot) => bot.name.toLowerCase().includes(searchQuery.toLowerCase().trim()))
     .sort((a, b) => Number(b.isChiefOfStaff) - Number(a.isChiefOfStaff));
 
+  const latestConversationFor = (botId: string): Conversation | null =>
+    conversations
+      .filter(
+        (c) =>
+          !c.isGroup &&
+          (c.source ?? 'app') !== 'slack' &&
+          c.participantBotIds.length === 1 &&
+          c.participantBotIds[0] === botId
+      )
+      .sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime())[0] || null;
+
   return (
     <aside
-      className={`w-72 shrink-0 border-r flex flex-col justify-between h-screen sticky top-0 z-20 select-none transition-colors ${
-        isDark ? 'bg-[#121418] border-[#26292d] text-[#e7e9ea]' : 'bg-[#f8f9fa] border-[#e5e7eb] text-[#0f1419]'
+      className={`w-[300px] xl:w-[312px] shrink-0 border-r flex flex-col justify-between h-screen sticky top-0 z-20 select-none transition-colors ${
+        isDark ? 'bg-[#111113] border-[#232326] text-[#f5f5f7]' : 'bg-[#f6f6f7] border-[#e6e6e8] text-[#1c1c1e]'
       }`}
     >
-      {/* Top Header: + Icon with Dropdown Menu (Create new Bot / Create group chat) */}
-      <div className="p-3 pb-2 flex flex-col space-y-2 shrink-0">
-        {/* Top Header Row with + icon and dropdown menu */}
-        <div className="flex items-center justify-end h-6 relative">
-          <button
-            onClick={() => setDropdownOpen((prev) => !prev)}
-            className={`p-1 rounded-full transition cursor-pointer ${
-              isDark
-                ? 'text-[#71767b] hover:text-white hover:bg-[#181a1f]'
-                : 'text-[#8b98a5] hover:text-black hover:bg-[#eef1f4]'
-            }`}
-            title="Add"
-          >
-            <Plus className="h-5 w-5 stroke-[2]" />
-          </button>
+      <div className="shrink-0 px-3.5 pt-3.5">
+        {/* Add */}
+        <div className="flex h-7 items-center justify-end">
+          <div className="relative">
+            <button
+              onClick={() => setDropdownOpen((prev) => !prev)}
+              className={`flex h-7 w-7 items-center justify-center rounded-md transition cursor-pointer ${
+                isDark
+                  ? 'text-[#98989f] hover:text-white hover:bg-[#1f1f22]'
+                  : 'text-[#8e8e93] hover:text-[#1c1c1e] hover:bg-[#e8e8ea]'
+              }`}
+              title="Add"
+              aria-label="Add"
+            >
+              <Plus className="h-[18px] w-[18px] stroke-[1.8]" />
+            </button>
 
-          {/* Dropdown Menu Overlay */}
-          {dropdownOpen && (
-            <>
-              {/* Backdrop overlay to close dropdown when clicking outside */}
-              <div
-                className="fixed inset-0 z-30"
-                onClick={() => setDropdownOpen(false)}
-              />
+            {dropdownOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setDropdownOpen(false)} />
 
-              {/* Dropdown Menu Box */}
-              <div
-                className={`absolute right-0 top-full mt-1 w-48 rounded-2xl border shadow-xl p-1.5 z-40 space-y-0.5 text-xs font-semibold ${
-                  isDark
-                    ? 'bg-[#181a1f] border-[#26292d] text-[#e7e9ea]'
-                    : 'bg-white border-[#e5e7eb] text-[#0f1419]'
-                }`}
-              >
-                {/* 1. Create new Bot -> opens working Create Bot modal */}
-                <button
-                  onClick={() => {
-                    setDropdownOpen(false);
-                    if (onOpenCreateBotModal) onOpenCreateBotModal();
-                  }}
-                  className={`w-full flex items-center space-x-2 px-3 py-2 rounded-xl transition text-left ${
-                    isDark ? 'hover:bg-[#26292d]' : 'hover:bg-[#f0f2f5]'
+                <div
+                  className={`absolute right-0 top-full mt-1.5 w-48 rounded-[10px] border shadow-lg p-1 z-40 text-[12px] font-medium ${
+                    isDark
+                      ? 'bg-[#1c1c1f] border-[#2c2c2f] text-[#f5f5f7]'
+                      : 'bg-white border-[#e6e6e8] text-[#1c1c1e]'
                   }`}
                 >
-                  <BotIcon className="h-4 w-4 shrink-0 text-purple-400" />
-                  <span>Create new Bot</span>
-                </button>
+                  <button
+                    onClick={() => {
+                      setDropdownOpen(false);
+                      onOpenCreateBotModal?.();
+                    }}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-md transition text-left ${
+                      isDark ? 'hover:bg-[#26262a]' : 'hover:bg-[#f2f2f4]'
+                    }`}
+                  >
+                    <BotIcon className="h-4 w-4 shrink-0" />
+                    <span>Create new Bot</span>
+                  </button>
 
-                {/* 2. Create group chat -> does nothing */}
-                <button
-                  onClick={() => {
-                    setDropdownOpen(false);
-                    /* Create group chat - do nothing as requested */
-                  }}
-                  className={`w-full flex items-center space-x-2 px-3 py-2 rounded-xl transition text-left opacity-80 ${
-                    isDark ? 'hover:bg-[#26292d]' : 'hover:bg-[#f0f2f5]'
-                  }`}
-                >
-                  <Users className="h-4 w-4 shrink-0 text-[#71767b]" />
-                  <span>Create group chat</span>
-                </button>
-              </div>
-            </>
-          )}
+                  <button
+                    onClick={() => {
+                      setDropdownOpen(false);
+                      /* Create group chat - not wired up yet */
+                    }}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-md transition text-left opacity-60 ${
+                      isDark ? 'hover:bg-[#26262a]' : 'hover:bg-[#f2f2f4]'
+                    }`}
+                  >
+                    <Users className="h-4 w-4 shrink-0" />
+                    <span>Create group chat</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
-        {/* Search Bar filtering bot by name */}
+        {/* Search */}
         <div
-          className={`flex items-center px-3 py-2 rounded-xl border text-xs transition ${
+          className={`mt-3 flex h-9 items-center gap-2 rounded-lg px-3 transition ${
             isDark
-              ? 'bg-[#181a1f] border-[#26292d] text-white focus-within:border-[#536471]'
-              : 'bg-[#eef1f4] border-transparent text-[#0f1419] focus-within:border-[#cfd9de] focus-within:bg-white'
+              ? 'bg-[#1c1c1f] text-[#f5f5f7] focus-within:bg-[#242428]'
+              : 'bg-[#ececee] text-[#1c1c1e] focus-within:bg-[#e6e6e8]'
           }`}
         >
-          <Search className={`h-4 w-4 mr-2 shrink-0 ${isDark ? 'text-[#71767b]' : 'text-[#8b98a5]'}`} />
+          <Search className="h-[15px] w-[15px] shrink-0 text-[#8e8e93]" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search"
-            className="w-full bg-transparent focus:outline-none placeholder:text-[#8b98a5] text-xs font-medium"
+            className="w-full bg-transparent text-[13px] focus:outline-none placeholder:text-[#8e8e93]"
           />
         </div>
       </div>
 
-      {/* Main Bot Roster - Displaying all bots from database */}
-      <div className="flex-1 overflow-y-auto px-2 py-1 space-y-0.5">
+      {/* Bot roster */}
+      <div className="flex-1 overflow-y-auto px-2.5 py-3 no-scrollbar">
         {isWorkspaceLoading && bots.length === 0 ? (
-          <div role="status" aria-label="Loading bots" className="space-y-2 p-2">
-            {[0, 1, 2, 3, 4].map((item) => (
-              <div
-                key={item}
-                className={`flex items-center gap-3 rounded-2xl p-2.5 ${
-                  isDark ? 'bg-[#181a1f]/60' : 'bg-white/70'
-                }`}
-              >
-                <span className={`h-9 w-9 shrink-0 animate-pulse rounded-full ${isDark ? 'bg-[#2f3336]' : 'bg-[#e5e7eb]'}`} />
+          <div role="status" aria-label="Loading bots" className="space-y-1">
+            {[0, 1, 2, 3, 4, 5].map((item) => (
+              <div key={item} className="flex items-center gap-3 rounded-[10px] p-2.5">
+                <span
+                  className={`h-9 w-9 shrink-0 animate-pulse rounded-full ${
+                    isDark ? 'bg-[#26262a]' : 'bg-[#e6e6e8]'
+                  }`}
+                />
                 <span className="min-w-0 flex-1 space-y-2">
-                  <span className={`block h-3 w-2/3 animate-pulse rounded ${isDark ? 'bg-[#2f3336]' : 'bg-[#e5e7eb]'}`} />
-                  <span className={`block h-2.5 w-1/2 animate-pulse rounded ${isDark ? 'bg-[#26292d]' : 'bg-[#eef1f4]'}`} />
+                  <span
+                    className={`block h-3 w-2/3 animate-pulse rounded ${
+                      isDark ? 'bg-[#26262a]' : 'bg-[#e6e6e8]'
+                    }`}
+                  />
+                  <span
+                    className={`block h-2.5 w-1/2 animate-pulse rounded ${
+                      isDark ? 'bg-[#1f1f22]' : 'bg-[#ececee]'
+                    }`}
+                  />
                 </span>
               </div>
             ))}
             <span className="sr-only">Loading your bots…</span>
           </div>
         ) : filteredBots.length === 0 ? (
-          <div className="p-4 text-center text-xs text-[#71767b]">
-            No bots match "{searchQuery}"
-          </div>
+          <div className="p-4 text-center text-[12px] text-[#8e8e93]">No bots match "{searchQuery}"</div>
         ) : (
           filteredBots.map((bot) => {
-            // Check if this bot is selected in active conversation
-            const activeConv = conversations.find((c) => c.id === selectedConversationId);
-            const isSelected =
-              activeConv &&
-              !activeConv.isGroup &&
-              activeConv.participantBotIds.includes(bot.id);
+            const conversation = latestConversationFor(bot.id);
+            const isSelected = activeBotId === bot.id;
+            const preview = previewLine(conversation, bot.roleTitle);
+            const time = formatListTime(conversation?.lastMessageAt);
 
             return (
               <div
                 key={bot.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => openChatWithBot(bot.id)}
-                className={`group relative w-full flex items-center justify-between p-2.5 rounded-2xl cursor-pointer transition ${
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openChatWithBot(bot.id);
+                  }
+                }}
+                className={`flex w-full cursor-pointer items-center gap-3 rounded-[10px] p-2.5 text-left transition ${
                   isSelected
                     ? isDark
-                      ? 'bg-[#26292d] text-white font-semibold'
-                      : 'bg-[#e5e7eb] text-[#0f1419] font-semibold'
+                      ? 'bg-[#26262a]'
+                      : 'bg-[#e9e9eb]'
                     : isDark
-                    ? 'text-[#e7e9ea] hover:bg-[#181a1f]'
-                    : 'text-[#0f1419] hover:bg-[#f0f2f5]'
+                      ? 'hover:bg-[#1c1c1f]'
+                      : 'hover:bg-[#ededee]'
                 }`}
               >
-                <div className="flex items-center space-x-3 min-w-0">
-                  {/* Grok Geometric Avatar */}
-                  <BotBlobAvatar name={bot.name} avatarShape={bot.avatar} color={bot.color} size={36} />
+                <BotBlobAvatar name={bot.name} avatarShape={bot.avatar} color={bot.color} size={38} />
 
-                  {/* Bot Name & Subtitle (roleTitle / last snippet) */}
-                  <div className="min-w-0 text-left">
-                    <div className="flex items-center space-x-1">
-                      <span className="text-xs font-extrabold truncate leading-tight">{bot.name}</span>
-                      {bot.isChiefOfStaff && (
-                        <span className="shrink-0 rounded-full bg-purple-500/20 px-1 py-0.2 text-[8px] font-extrabold uppercase font-mono text-purple-400">
-                          CoS
-                        </span>
-                      )}
-                    </div>
-                    <span className={`text-[11px] truncate block leading-tight ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                      {bot.roleTitle}
-                    </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-[14px] font-semibold leading-tight">{bot.name}</span>
+                    <span className="shrink-0 text-[11px] text-[#8e8e93]">{time}</span>
                   </div>
-                </div>
 
-                {/* Status dot + settings affordance */}
-                <div className="shrink-0 flex items-center space-x-1">
-                  {bot.status === 'working' && (
-                    <span className="h-2 w-2 rounded-full bg-purple-500 animate-pulse" />
-                  )}
-                  {bot.status === 'waiting_approval' && (
-                    <span className="h-2 w-2 rounded-full bg-amber-400 animate-ping" />
-                  )}
-
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenBotProfile?.(bot);
-                    }}
-                    className={`p-1 rounded-md transition opacity-0 group-hover:opacity-100 ${
-                      isDark ? 'hover:bg-[#202327] text-[#71767b] hover:text-white' : 'hover:bg-[#e5e7eb] text-[#536471] hover:text-black'
-                    }`}
-                    title="Bot settings"
-                    aria-label={`Settings for ${bot.name}`}
-                  >
-                    <Settings2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="mt-0.5 flex items-center gap-1.5">
+                    <span className={`min-w-0 truncate text-[12px] ${isDark ? 'text-[#98989f]' : 'text-[#8e8e93]'}`}>
+                      {preview}
+                    </span>
+                    {bot.status === 'working' && (
+                      <span className="h-[7px] w-[7px] shrink-0 rounded-full bg-[#0a84ff]" aria-label="Working" />
+                    )}
+                    {bot.status === 'waiting_approval' && (
+                      <span
+                        className="h-[7px] w-[7px] shrink-0 rounded-full bg-[#ff9f0a]"
+                        aria-label="Waiting for approval"
+                      />
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -244,73 +266,95 @@ export const GrokSidebar: React.FC<GrokSidebarProps> = ({
         )}
       </div>
 
-      {/* Bottom Section: Plugins & Account User from Database */}
-      <div className={`p-3 border-t shrink-0 space-y-2 ${isDark ? 'border-[#26292d] bg-[#0e0f12]' : 'border-[#e5e7eb] bg-[#f8f9fa]'}`}>
-        {/* Plugins Section */}
+      {/* Plugins + account */}
+      <div className={`shrink-0 px-2.5 pb-3 pt-2 border-t ${isDark ? 'border-[#232326]' : 'border-[#e6e6e8]'}`}>
         <button
           onClick={() => onOpenPlugins?.()}
-          className={`w-full flex items-center justify-between px-2 py-1.5 rounded-xl cursor-pointer transition text-xs font-bold ${
-            isDark ? 'text-[#e7e9ea] hover:bg-[#181a1f]' : 'text-[#0f1419] hover:bg-[#eef1f4]'
+          className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-[13px] font-medium transition ${
+            isDark ? 'hover:bg-[#1c1c1f]' : 'hover:bg-[#ededee]'
           }`}
         >
-          <div className="flex items-center space-x-2.5">
-            <Plug className="h-4 w-4 stroke-[2]" />
+          <span className="flex items-center gap-2.5">
+            <Plug className="h-[17px] w-[17px] stroke-[1.8]" />
             <span>Plugins</span>
-          </div>
+          </span>
           {installedPlugins.length > 0 && (
-            <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-400">
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                isDark ? 'bg-[#26262a] text-[#98989f]' : 'bg-[#e6e6e8] text-[#6e6e73]'
+              }`}
+            >
               {installedPlugins.length}
             </span>
           )}
         </button>
 
-        {/* User account - opens a small dropdown (Settings / Change theme) */}
-        <div className="relative">
+        <div className="relative mt-0.5">
           <button
             onClick={() => setAccountMenuOpen((prev) => !prev)}
-            className={`w-full flex items-center justify-between px-2 py-1.5 rounded-xl transition text-left min-w-0 ${
-              isDark ? 'hover:bg-[#181a1f]' : 'hover:bg-[#eef1f4]'
+            className={`w-full flex items-center justify-between rounded-lg px-2 py-1.5 transition text-left ${
+              isDark ? 'hover:bg-[#1c1c1f]' : 'hover:bg-[#ededee]'
             }`}
             aria-haspopup="menu"
             aria-expanded={accountMenuOpen}
           >
-            <div className="flex items-center space-x-2.5 min-w-0">
+            <span className="flex min-w-0 items-center gap-2.5">
               <Avatar name={currentUser?.name || 'User'} src={currentUser?.avatar} size="md" />
-              <span className={`text-xs font-extrabold truncate ${isDark ? 'text-white' : 'text-[#0f1419]'}`}>
-                {currentUser?.name || 'User'}
-              </span>
-            </div>
+              <span className="truncate text-[13px] font-medium">{currentUser?.name || 'User'}</span>
+            </span>
             <ChevronDown
-              className={`h-4 w-4 shrink-0 transition-transform ${
-                isDark ? 'text-[#71767b]' : 'text-[#8b98a5]'
-              } ${accountMenuOpen ? 'rotate-180' : ''}`}
+              className={`h-4 w-4 shrink-0 text-[#8e8e93] transition-transform ${
+                accountMenuOpen ? 'rotate-180' : ''
+              }`}
             />
           </button>
 
           {accountMenuOpen && (
             <>
-              {/* Click-outside to dismiss */}
               <div className="fixed inset-0 z-30" onClick={() => setAccountMenuOpen(false)} />
 
               <div
                 role="menu"
-                className={`absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-2xl border shadow-xl ${
-                  isDark ? 'border-[#26292d] bg-[#16181c] text-white' : 'border-[#e5e7eb] bg-white text-[#0f1419]'
+                className={`absolute bottom-full left-0 right-0 z-40 mb-1.5 overflow-hidden rounded-[10px] border p-1 shadow-lg ${
+                  isDark
+                    ? 'border-[#2c2c2f] bg-[#1c1c1f] text-[#f5f5f7]'
+                    : 'border-[#e6e6e8] bg-white text-[#1c1c1e]'
                 }`}
               >
+                <div className={`border-b px-2.5 py-2 ${isDark ? 'border-[#2c2c2f]' : 'border-[#e6e6e8]'}`}>
+                  <p className="truncate text-[12px] font-semibold">{currentUser?.name || 'User'}</p>
+                  <p className="mt-0.5 truncate text-[11px] text-[#8e8e93]">{currentUser?.email}</p>
+                </div>
+
                 <button
                   role="menuitem"
                   onClick={() => toggleTheme()}
-                  className={`flex w-full items-center space-x-2.5 px-3 py-2 text-xs font-semibold transition ${
-                    isDark ? 'border-[#26292d] hover:bg-[#202327]' : 'border-[#e5e7eb] hover:bg-[#f0f2f5]'
+                  className={`mt-1 flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-[12px] font-medium transition ${
+                    isDark ? 'hover:bg-[#26262a]' : 'hover:bg-[#f2f2f4]'
                   }`}
                 >
                   {isDark ? (
-                    <Sun className="h-4 w-4 text-amber-400" />
+                    <Sun className="h-4 w-4 text-[#ff9f0a]" />
                   ) : (
-                    <Moon className="h-4 w-4 text-purple-600" />
+                    <Moon className="h-4 w-4 text-[#8e8e93]" />
                   )}
                   <span>Change theme</span>
+                </button>
+
+                <div className={`my-1 border-t ${isDark ? 'border-[#2c2c2f]' : 'border-[#e6e6e8]'}`} />
+
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    void logout();
+                  }}
+                  className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-[12px] font-medium text-[#ff453a] transition ${
+                    isDark ? 'hover:bg-[#ff453a]/10' : 'hover:bg-[#ff453a]/5'
+                  }`}
+                >
+                  <LogOut className="h-4 w-4" />
+                  <span>Sign out</span>
                 </button>
               </div>
             </>

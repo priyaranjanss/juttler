@@ -22,8 +22,17 @@ const BASE_URL = backendUrl
 
 let authToken: string | null = null;
 
+/** Called once per burst when an authenticated request is rejected. */
+type UnauthorizedHandler = () => void;
+let unauthorizedHandler: UnauthorizedHandler | null = null;
+let lastUnauthorizedAt = 0;
+
 export const setAuthToken = (token: string | null): void => {
   authToken = token;
+};
+
+export const setUnauthorizedHandler = (handler: UnauthorizedHandler | null): void => {
+  unauthorizedHandler = handler;
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -33,6 +42,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (options.method && options.method !== 'GET') {
     headers['Content-Type'] = 'application/json';
   }
+  const sentWithToken = Boolean(authToken);
   if (authToken) {
     headers.Authorization = `Bearer ${authToken}`;
   }
@@ -47,6 +57,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     } catch {
       // response had no JSON body
     }
+
+    // A bearer token that the API no longer accepts means the session ended
+    // (expired, revoked by a deploy, or the account was disabled). Tell the app
+    // once, so parallel requests do not each redirect.
+    if (res.status === 401 && sentWithToken && Date.now() - lastUnauthorizedAt > 2000) {
+      lastUnauthorizedAt = Date.now();
+      unauthorizedHandler?.();
+    }
+
     throw new Error(message);
   }
 

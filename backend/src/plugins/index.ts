@@ -12,7 +12,6 @@ import { gmailPlugin } from './gmail';
 import { githubPlugin } from './github';
 import { jiraPlugin } from './jira';
 import { slackPlugin } from './slack';
-import { webSearchPlugin } from './web-search';
 import { PluginModule, PluginOAuthSpec } from './types';
 import { ToolExecutor, ToolOutcome, isAuthFailure } from './shared';
 import {
@@ -31,7 +30,6 @@ import {
 } from './registry';
 
 const MODULES: PluginModule[] = [
-  webSearchPlugin,
   githubPlugin,
   jiraPlugin,
   slackPlugin,

@@ -10,4 +10,11 @@ describe('toSlackMrkdwn', () => {
   it('strips tool markup', () => {
     assert.equal(toSlackMrkdwn('Hi <dots_function_call>x</dots_function_call> there'), 'Hi  there');
   });
+
+  it('converts a raw Slack user id to a native mention without double-wrapping mentions', () => {
+    assert.equal(
+      toSlackMrkdwn('Hi U0C4APM1B6Z and <@U0C4APM1B6Z>', 'U0C4APM1B6Z'),
+      'Hi <@U0C4APM1B6Z> and <@U0C4APM1B6Z>'
+    );
+  });
 });

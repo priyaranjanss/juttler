@@ -16,6 +16,12 @@ const INSECURE_DEV_SECRET = 'juttler-insecure-development-secret';
 // Token lifetime. After this the browser must log in again.
 export const JWT_EXPIRES_IN = '7d';
 
+// Tokens are scoped to this API so a token minted elsewhere with the same
+// secret cannot be replayed here.
+const JWT_ISSUER = 'juttler';
+const JWT_AUDIENCE = 'juttler-app';
+const JWT_ALGORITHM = 'HS256' as const;
+
 let cachedSecret: string | null = null;
 
 function getSecret(): string {
@@ -72,7 +78,12 @@ export function verifySlackLink(token: string | undefined): {
 }
 
 export function signAuthToken(userId: string): string {
-  return jwt.sign({ sub: userId }, getSecret(), { expiresIn: JWT_EXPIRES_IN });
+  return jwt.sign({ sub: userId }, getSecret(), {
+    expiresIn: JWT_EXPIRES_IN,
+    issuer: JWT_ISSUER,
+    audience: JWT_AUDIENCE,
+    algorithm: JWT_ALGORITHM,
+  });
 }
 
 // Returns the user id encoded in a valid, unexpired token, or null otherwise.
@@ -80,7 +91,11 @@ export function verifyAuthToken(token: string | undefined): string | null {
   if (!token) return null;
 
   try {
-    const payload = jwt.verify(token, getSecret());
+    const payload = jwt.verify(token, getSecret(), {
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
+      algorithms: [JWT_ALGORITHM],
+    });
     if (typeof payload === 'string') return null;
     return typeof payload.sub === 'string' ? payload.sub : null;
   } catch {

@@ -173,6 +173,24 @@ function stringifyContext(value: unknown): string {
   return JSON.stringify(value ?? null) ?? String(value);
 }
 
+/**
+ * Internal context markers we inject into the model's history
+ * (`[Previous tool call: ...]`, `[Previous tool result from ...]`) are not
+ * meant for the user. A model can echo them back verbatim, leaking raw JSON
+ * into its reply. Strip those blocks (and any orphaned JSON they leave
+ * behind) so the final text is clean.
+ */
+const LEAKED_CONTEXT_RE =
+  /\[Previous tool (?:call|result from [^\]]+)\][\s\S]*?(?=\n\s*\n|\n\[Previous|$)/gi;
+
+function stripLeakedContext(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(LEAKED_CONTEXT_RE, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function truncateForModel(value: unknown, max = MAX_TOOL_RESULT_CHARS): string {
   const text = stringifyContext(value);
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -1045,7 +1063,7 @@ export async function runBotTurn(params: {
 
       // No structured tool calls this round.
       if (toolCalls.length === 0) {
-        const text = stripEmbeddedToolMarkup(rawContent);
+        const text = stripLeakedContext(stripEmbeddedToolMarkup(rawContent));
         const canContinue = tools.length > 0 && round < MAX_TOOL_ROUNDS - 1;
         const needsMoreWork = needsActionAfterReads(collected, params.messageContent, params.history);
 
@@ -1108,7 +1126,7 @@ export async function runBotTurn(params: {
 
       // The model wants to act: record its request, then execute through the gateway.
       // Never keep raw tool markup in the assistant content sent back to the model.
-      const visibleContent = stripEmbeddedToolMarkup(rawContent);
+      const visibleContent = stripLeakedContext(stripEmbeddedToolMarkup(rawContent));
       messages.push({
         role: 'assistant',
         content: visibleContent || null,
@@ -1404,7 +1422,7 @@ export async function runBotTurn(params: {
       };
     }
 
-    const finalText = stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? '');
+    const finalText = stripLeakedContext(stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? ''));
     const safeFinal =
       finalText.trim() && !contentLooksLikeToolMarkup(finalText) ? finalText : undefined;
     return { ...ensureTurnReply(safeFinal, collected), tokenUsage: usage, reasoningMode };

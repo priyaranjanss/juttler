@@ -481,9 +481,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
       const credential =
         plugin.slug === 'jira'
           ? { site: site.trim(), email: email.trim(), apiToken: credentialText.trim() }
-          : plugin.slug === 'web-search'
-            ? { apiKey: credentialText.trim() }
-            : { token: credentialText.trim() };
+          : { token: credentialText.trim() };
 
       if (plugin.slug === 'jira' && (!credential.site || !credential.email)) {
         showToast('Enter your Jira site and email first', 'warning');
@@ -652,7 +650,7 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
         ) : (
           <div className="space-y-2">
             <label className={labelClasses}>
-              {plugin.slug === 'web-search' ? 'Search API key' : plugin.slug === 'jira' ? 'Jira API token' : 'Access token'}
+              {plugin.slug === 'jira' ? 'Jira API token' : 'Access token'}
             </label>
 
             {plugin.slug === 'jira' && (
@@ -681,13 +679,11 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
                 value={credentialText}
                 onChange={(e) => setCredentialText(e.target.value)}
                 placeholder={
-                  plugin.slug === 'web-search'
-                    ? 'Brave Search API key'
-                    : plugin.slug === 'jira'
-                      ? 'Atlassian API token'
-                      : plugin.slug === 'slack'
-                        ? 'xoxb-...'
-                        : 'ghp_...'
+                  plugin.slug === 'jira'
+                    ? 'Atlassian API token'
+                    : plugin.slug === 'slack'
+                      ? 'xoxb-...'
+                      : 'ghp_...'
                 }
                 autoComplete="off"
                 spellCheck={false}

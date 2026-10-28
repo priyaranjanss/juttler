@@ -1,1 +1,1 @@
-export { api, setAuthToken } from '../api/services/api';
+export { api, setAuthToken, setUnauthorizedHandler } from '../api/services/api';

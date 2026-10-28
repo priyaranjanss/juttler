@@ -7,7 +7,7 @@ import {
   PluginDefinition,
   PluginInstallation,
 } from '../types/index';
-import { api, setAuthToken } from '../services/api';
+import { api, setAuthToken, setUnauthorizedHandler } from '../services/api';
 import { useRouter } from '../router';
 
 export type NavigationTab = 'chat';
@@ -33,7 +33,7 @@ interface AppContextType {
   navigate: (to: string) => void;
   toggleTheme: () => void;
   login: (user: User, token: string) => void;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshData: () => Promise<void>;
   showToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
   openChatWithBot: (botId: string) => Promise<void>;
@@ -65,7 +65,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const saved = localStorage.getItem(THEME_STORAGE_KEY);
       if (saved === 'light' || saved === 'dark') return saved;
     }
-    return 'dark';
+    return 'light';
   });
 
   useEffect(() => {
@@ -180,11 +180,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveTab('chat');
   }, []);
 
-  const logout = useCallback(() => {
-    api.logout().catch(() => {});
+  const isAuthenticatedRef = useRef(false);
+  isAuthenticatedRef.current = isAuthenticated;
+
+  /** Drops every trace of the session, without touching the theme preference. */
+  const clearSession = useCallback(() => {
+    workspaceDataLoaded.current = false;
     setCurrentUser(null);
     setIsAuthenticated(false);
-    workspaceDataLoaded.current = false;
+    setIsLoading(false);
     setIsWorkspaceLoading(false);
     setAuthToken(null);
     setBots([]);
@@ -199,6 +203,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // ignore storage errors
     }
   }, []);
+
+  const logout = useCallback(async () => {
+    // Signing out is local-first: the UI never waits on the network. The JWT is
+    // stateless, so the server call is only an audit-friendly notification.
+    // Drop the in-memory token first so an expired session cannot answer the
+    // sign-out call with a 401 and trigger the "session expired" path.
+    setAuthToken(null);
+    const request = api.logout().catch(() => {});
+    clearSession();
+    navigate('/login');
+    await request;
+  }, [clearSession, navigate]);
+
+  // The API client reports a token the server has stopped accepting. Clear the
+  // session once and send the user back to sign in, preserving their location.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      if (!isAuthenticatedRef.current) return;
+      clearSession();
+      showToast('Your session expired. Please sign in again.', 'warning');
+      const currentPath = window.location.pathname;
+      const next =
+        currentPath === '/workspace' || currentPath.startsWith('/workspace/')
+          ? `?next=${encodeURIComponent(currentPath)}`
+          : '';
+      navigate(`/login${next}`);
+    });
+
+    return () => setUnauthorizedHandler(null);
+  }, [clearSession, navigate, showToast]);
 
   // Always-fresh view of the state openChatWithBot depends on, so the callback
   // can stay referentially stable (no spurious effect re-runs) while still

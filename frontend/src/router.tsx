@@ -23,12 +23,14 @@ export const RouterProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const navigate = useCallback((to: string) => {
     const target = to.startsWith('/') ? to : `/${to}`;
-    if (readPath() === target) {
-      setPath(target);
-      return;
+    // Route state is the pathname only; query strings (e.g. ?next=...) belong to
+    // the URL, not to the router. Keeping them out prevents redirect loops.
+    const targetPath = target.split('?')[0].split('#')[0] || '/';
+    const current = `${readPath()}${window.location.search}`;
+    if (current !== target) {
+      window.history.pushState({}, '', target);
     }
-    window.history.pushState({}, '', target);
-    setPath(target);
+    setPath(targetPath);
   }, []);
 
   return <RouterContext.Provider value={{ path, navigate }}>{children}</RouterContext.Provider>;

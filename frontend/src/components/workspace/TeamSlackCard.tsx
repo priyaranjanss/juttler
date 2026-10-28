@@ -38,8 +38,8 @@ export const TeamSlackCard: React.FC<TeamSlackCardProps> = ({ bot, isDark }) => 
   }, [bot.id, bot.name]);
 
   const muted = isDark ? 'text-[#8b98a5]' : 'text-[#536471]';
-  const card = `rounded-xl border p-3 ${isDark ? 'border-[#2f3336] bg-[#181a1f]' : 'border-[#e5e7eb] bg-[#f8f9fa]'}`;
-  const primary = `w-full rounded-xl py-2 text-xs font-bold transition disabled:opacity-60 ${
+  const card = `rounded-[10px] border p-3 ${isDark ? 'border-[#2f3336] bg-[#181a1f]' : 'border-[#e5e7eb] bg-[#f8f9fa]'}`;
+  const primary = `w-full rounded-[10px] py-2 text-xs font-bold transition disabled:opacity-60 ${
     isDark ? 'bg-white text-black hover:bg-[#d7dbdc]' : 'bg-[#0f1419] text-white hover:bg-[#27313a]'
   }`;
 
@@ -142,7 +142,7 @@ export const TeamSlackCard: React.FC<TeamSlackCardProps> = ({ bot, isDark }) => 
             type="button"
             onClick={disconnect}
             disabled={busy !== null}
-            className={`mt-2 w-full rounded-xl py-2 text-xs font-bold transition disabled:opacity-60 ${
+            className={`mt-2 w-full rounded-[10px] py-2 text-xs font-bold transition disabled:opacity-60 ${
               isDark
                 ? 'border border-[#2f3336] text-[#f4212e] hover:bg-[#2a1215]'
                 : 'border border-[#e5e7eb] text-[#f4212e] hover:bg-[#fff5f5]'

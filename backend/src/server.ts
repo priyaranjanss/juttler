@@ -11,6 +11,13 @@ import slackTeamRoutes from './routes/slackTeamRoutes';
 import { syncPluginCatalog } from './repositories/plugins';
 
 const app = express();
+
+// Railway and similar hosts terminate TLS at one proxy hop. Trusting it makes
+// req.ip the real client for auth rate limiting. Set TRUST_PROXY=0 when the API
+// is exposed directly to the internet.
+const trustProxy = process.env.TRUST_PROXY;
+app.set('trust proxy', trustProxy === '0' ? false : Number(trustProxy) || 1);
+
 app.use(
   express.json({
     verify: (req, _res, buf) => {

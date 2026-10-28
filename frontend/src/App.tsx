@@ -59,23 +59,35 @@ const Root: React.FC = () => {
   const { path, navigate } = useRouter();
 
   useEffect(() => {
+    // Do not redirect until the stored session has been checked; otherwise a
+    // hard refresh of /workspace/... bounces through /login and loses the route.
+    if (isLoading) return;
+
     if (!isAuthenticated) {
-      if (path !== '/login' && path !== '/register') navigate('/login');
+      if (path !== '/login' && path !== '/register') {
+        const intended = path === '/' ? '/workspace' : path;
+        navigate(`/login?next=${encodeURIComponent(intended)}`);
+      }
       return;
     }
 
-    const home = '/workspace';
     if (path === '/' || path === '/login' || path === '/register') {
-      navigate(home);
-      return;
+      const requested = new URLSearchParams(window.location.search).get('next');
+      const safeNext =
+        requested && (requested === '/workspace' || requested.startsWith('/workspace/'))
+          ? requested
+          : '/workspace';
+      navigate(safeNext);
     }
-  }, [isAuthenticated, currentUser, path, navigate]);
+  }, [isAuthenticated, isLoading, path, navigate]);
 
   let content: React.ReactNode;
 
-  if (!isAuthenticated) {
+  if (isLoading) {
+    content = <LoadingScreen />;
+  } else if (!isAuthenticated) {
     content = path === '/register' ? <RegisterPage /> : <LoginPage />;
-  } else if (isLoading || !currentUser) {
+  } else if (!currentUser) {
     content = <LoadingScreen />;
   } else if (path.startsWith('/workspace')) {
     content = (

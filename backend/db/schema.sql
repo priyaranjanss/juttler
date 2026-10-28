@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS bots (
   system_prompt      TEXT NOT NULL DEFAULT '',
   avatar             TEXT NOT NULL DEFAULT 'Ã°Å¸Â¤â€“',
   color              TEXT NOT NULL DEFAULT '#6366f1',
-  allowed_tools      JSONB NOT NULL DEFAULT '["web_search"]',
+  allowed_tools      JSONB NOT NULL DEFAULT '[]',
   is_chief_of_staff  BOOLEAN NOT NULL DEFAULT false,
   status             TEXT NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'working', 'waiting_approval')),
   memory_enabled     BOOLEAN NOT NULL DEFAULT true,
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS skills (
   description      TEXT NOT NULL DEFAULT '',
   input_parameters JSONB NOT NULL DEFAULT '[]',
   instructions     TEXT NOT NULL,
-  allowed_tools    JSONB NOT NULL DEFAULT '["web_search"]',
+  allowed_tools    JSONB NOT NULL DEFAULT '[]',
   success_criteria TEXT NOT NULL DEFAULT '',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()

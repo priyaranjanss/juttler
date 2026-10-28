@@ -83,7 +83,7 @@ export const BotPluginAccess: React.FC<BotPluginAccessProps> = ({ bot, isDark, o
   }, [githubConnected, showToast]);
 
   const muted = isDark ? 'text-[#8b98a5]' : 'text-[#536471]';
-  const card = `rounded-xl border p-3 ${isDark ? 'border-[#2f3336] bg-[#181a1f]' : 'border-[#e5e7eb] bg-[#f8f9fa]'}`;
+  const card = `rounded-[10px] border p-3 ${isDark ? 'border-[#2f3336] bg-[#181a1f]' : 'border-[#e5e7eb] bg-[#f8f9fa]'}`;
 
   const allowPlugin = async (slug: string, on: boolean) => {
     const plugin = plugins.find((item) => item.slug === slug);

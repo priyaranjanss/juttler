@@ -37,6 +37,8 @@ export function readBearerToken(req: Request): string | undefined {
 }
 
 export async function authenticate(req: Request, res: Response, next: () => void): Promise<void> {
+  res.setHeader('WWW-Authenticate', 'Bearer');
+
   const userId = verifyAuthToken(readBearerToken(req));
   if (!userId) {
     res.status(401).json({ error: 'Authentication required' });

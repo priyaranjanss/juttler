@@ -12,15 +12,15 @@
  * (merging a PR, posting to Slack), because those leave the system.
  */
 
-import { Bot } from '../types';
-import { BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS } from '../constants';
+import { Bot } from '../../types';
+import { BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS } from '../../constants';
 import {
   listBotsForUser,
   createBot,
   updateBot,
   deleteBot,
   findBotById,
-} from '../repositories/bots';
+} from '../../repositories/bots';
 import {
   listPluginDefinitions,
   findPluginDefinitionBySlug,
@@ -30,9 +30,9 @@ import {
   deleteInstallation,
   listBotAccess,
   upsertBotAccess,
-} from '../repositories/plugins';
-import { isChiefOfStaffBot } from '../config/chiefOfStaff';
-import { registry, resolveTool, listAllTools } from '../plugins';
+} from '../../repositories/plugins';
+import { isChiefOfStaffBot } from '../../config/chiefOfStaff';
+import { registry, resolveTool, listAllTools } from '..';
 
 export interface WorkspaceToolSpec {
   name: string;

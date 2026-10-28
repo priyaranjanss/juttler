@@ -1,4 +1,5 @@
-﻿import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
+﻿import { randomBytes, scrypt, timingSafeEqual } from 'crypto';
+import { promisify } from 'util';
 import { User } from '../types';
 import { sql } from '../config/db';
 import { generateId } from '../utils/id';
@@ -17,16 +18,26 @@ interface UserRow {
   created_at: Date;
 }
 
-export function hashPassword(password: string): string {
+const scryptAsync = promisify(scrypt) as (
+  password: string,
+  salt: string,
+  keylen: number
+) => Promise<Buffer>;
+
+/**
+ * scrypt is deliberately CPU-heavy, so it runs on the libuv thread pool rather
+ * than blocking the event loop while a sign-in is verified.
+ */
+export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16).toString('hex');
-  const derived = scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${derived}`;
+  const derived = await scryptAsync(password, salt, 64);
+  return `${salt}:${derived.toString('hex')}`;
 }
 
-export function verifyPassword(password: string, storedHash: string): boolean {
+export async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   const [salt, expected] = storedHash.split(':');
   if (!salt || !expected) return false;
-  const candidate = scryptSync(password, salt, 64);
+  const candidate = await scryptAsync(password, salt, 64);
   const expectedBuffer = Buffer.from(expected, 'hex');
   return candidate.length === expectedBuffer.length && timingSafeEqual(candidate, expectedBuffer);
 }

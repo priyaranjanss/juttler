@@ -95,13 +95,14 @@ async function describeChannel(
   }
 }
 
-async function personName(token: string, userId: string): Promise<string> {
+async function personName(token: string, userId: string, fallback = 'there'): Promise<string> {
   try {
     const info = await slackApi(token, 'users.info', { user: userId });
     const profile = info.user?.profile ?? {};
-    return profile.display_name || info.user?.real_name || info.user?.name || userId;
-  } catch {
-    return userId;
+    return profile.display_name || info.user?.real_name || info.user?.name || fallback;
+  } catch (err) {
+    console.warn('Slack user lookup failed:', err);
+    return fallback;
   }
 }
 
@@ -166,8 +167,14 @@ async function promptToLink(input: {
   }
 }
 
-async function postReply(token: string, channel: string, text: string, threadTs?: string): Promise<void> {
-  const formatted = toSlackMrkdwn(text);
+async function postReply(
+  token: string,
+  channel: string,
+  text: string,
+  threadTs?: string,
+  mentionUserId?: string
+): Promise<void> {
+  const formatted = toSlackMrkdwn(text, mentionUserId);
   const clipped = formatted.length > 3500 ? `${formatted.slice(0, 3500)}…` : formatted;
   await slackApi(token, 'chat.postMessage', {
     channel,
@@ -239,7 +246,10 @@ async function handleSlackEvent(body: SlackEventBody): Promise<void> {
     return;
   }
 
-  const speaker = await personName(app.botToken, event.user);
+  const speaker =
+    linked.slackDisplayName?.trim() ||
+    linked.name.trim() ||
+    (await personName(app.botToken, event.user));
   const title = channelType === 'im' ? `Slack DM · ${speaker}` : `Slack · ${described.label}`;
   let conversationId = existing?.conversationId ?? null;
   if (!conversationId) {
@@ -287,6 +297,7 @@ async function handleSlackEvent(body: SlackEventBody): Promise<void> {
 
   let reply: string;
   let failed = false;
+  let slackPostError: string | null = null;
   try {
     const turn = await runBotTurnWithTools({
       userId: bot.userId,
@@ -327,5 +338,23 @@ async function handleSlackEvent(body: SlackEventBody): Promise<void> {
   };
   await createMessage(botMsg);
   await touchConversation(conversationId, reply);
-  await postReply(app.botToken, event.channel, reply, replyThreadTs);
+
+  try {
+    await postReply(app.botToken, event.channel, reply, replyThreadTs, event.user);
+  } catch (err) {
+    slackPostError = err instanceof Error ? err.message : String(err);
+    console.error('Slack post reply failed:', slackPostError);
+  }
+
+  if (slackPostError) {
+    console.info(
+      'Slack reply diagnostics: appId=%s teamId=%s botUserId=%s channel=%s replyTruncated=%s postError=%s',
+      app.slackAppId ?? 'none',
+      app.slackTeamId ?? 'none',
+      app.botUserId ?? 'none',
+      event.channel,
+      reply.length > 200 ? reply.slice(0, 200) + '…' : reply,
+      slackPostError
+    );
+  }
 }

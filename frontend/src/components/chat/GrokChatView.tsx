@@ -4,10 +4,7 @@ import { useRouter } from '../../router';
 import { BotBlobAvatar } from '../common/BotBlobAvatar';
 import { Markdown } from './Markdown';
 import { PluginLogo } from '../common/PluginLogo';
-import {
-  Message,
-  Bot,
-} from '../../types';
+import { Message, Bot } from '../../types';
 import { api } from '../../services/api';
 import {
   Mic,
@@ -25,6 +22,8 @@ import {
   CheckCircle2,
   XCircle,
   ChevronRight,
+  FileText,
+  Download,
 } from 'lucide-react';
 
 /** Short human line under a workspace-tool card. */
@@ -32,13 +31,13 @@ function summariseWorkspaceArgs(toolName: string, args: Record<string, any> | un
   const a = args || {};
   switch (toolName) {
     case 'create_bot':
-      return [a.name, a.role_title].filter(Boolean).join(' â€” ');
+      return [a.name, a.role_title].filter(Boolean).join(' — ');
     case 'update_bot':
     case 'delete_bot':
       return String(a.bot_name || '');
     case 'set_bot_tools': {
       const tools = typeof a.tools === 'string' ? a.tools.split(',').filter(Boolean) : [];
-      return `${a.bot_name || ''} â†’ ${tools.length ? tools.join(', ') : 'no tools'} (${a.plugin_slug || ''})`;
+      return `${a.bot_name || ''} → ${tools.length ? tools.join(', ') : 'no tools'} (${a.plugin_slug || ''})`;
     }
     case 'connect_plugin':
     case 'disconnect_plugin':
@@ -75,43 +74,66 @@ function useElapsed(active: boolean): number {
   return elapsed;
 }
 
+/** Centred time marker at the top of the thread. */
+function chatTimeLabel(iso: string | undefined): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const sameDay = date.toDateString() === new Date().toDateString();
+  if (sameDay) return time;
+  return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })} · ${time}`;
+}
+
+/** Image-generation tool results arrive as base64 payloads. */
+function renderImageResult(result: any, isDark: boolean) {
+  const images: any[] = Array.isArray(result?.images) ? result.images : [];
+  if (images.length === 0) return null;
+
+  return (
+    <div className="grid grid-cols-1 gap-2">
+      {images.map((image, index) => {
+        const src = image?.b64_json ? `data:image/png;base64,${image.b64_json}` : image?.url;
+        if (!src) return null;
+        return (
+          <img
+            key={`${index}-${image?.revised_prompt ?? ''}`}
+            src={src}
+            alt={result?.revised_prompt || result?.prompt || 'Generated image'}
+            className={`w-full rounded-[10px] border object-cover ${isDark ? 'border-[#2c2c2f]' : 'border-[#e6e6e8]'}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Shown while a reply is being generated, so the wait is visibly alive rather
  * than an empty thread after the user's message.
  */
-const ThinkingIndicator: React.FC<{ bot?: Bot; isDark: boolean }> = ({ bot, isDark }) => {
+const ThinkingIndicator: React.FC<{ isDark: boolean }> = ({ isDark }) => {
   const elapsed = useElapsed(true);
 
   return (
-    <div className="flex items-center space-x-2.5 px-1" aria-live="polite">
-      <BotBlobAvatar
-        name={bot?.name || 'Bot'}
-        avatarShape={bot?.avatar}
-        color={bot?.color}
-        size={28}
-      />
-
-      <div className="flex items-center space-x-2">
-        {/* Three dots, staggered */}
-        <div className="flex items-center space-x-1" aria-hidden="true">
-          {[0, 1, 2].map((i) => (
-            <span
-              key={i}
-              className={`h-1.5 w-1.5 rounded-full motion-safe:animate-bounce ${
-                isDark ? 'bg-[#71767b]' : 'bg-[#8b98a5]'
-              }`}
-              style={{ animationDelay: `${i * 0.16}s`, animationDuration: '0.9s' }}
-            />
-          ))}
-        </div>
-
-        <span className={`text-[11px] font-semibold ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-          {thinkingLabel(elapsed)}
-        </span>
+    <div className="flex items-center gap-2.5 px-1 py-1" aria-live="polite">
+      <div className="flex items-center gap-1" aria-hidden="true">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className={`h-1.5 w-1.5 rounded-full motion-safe:animate-bounce ${
+              isDark ? 'bg-[#8e8e93]' : 'bg-[#b0b0b5]'
+            }`}
+            style={{ animationDelay: `${i * 0.16}s`, animationDuration: '0.9s' }}
+          />
+        ))}
       </div>
+      <span className={`text-[11px] font-medium ${isDark ? 'text-[#8e8e93]' : 'text-[#8e8e93]'}`}>
+        {thinkingLabel(elapsed)}
+      </span>
     </div>
   );
-}
+};
 
 // The Chief of Staff hands work to specialists with this tool; the chat renders
 // it as a delegation card rather than a raw tool call.
@@ -124,7 +146,7 @@ const WORKSPACE_TOOL_LABELS: Record<string, string> = {
   create_bot: 'Creating a Bot',
   update_bot: 'Updating a Bot',
   delete_bot: 'Deleting a Bot',
-  set_bot_tools: 'Setting a Bot\'s tools',
+  set_bot_tools: "Setting a Bot's tools",
   list_plugins: 'Listing plugins',
   get_plugin_requirements: 'Checking what a plugin needs',
   connect_plugin: 'Connecting a plugin',
@@ -136,15 +158,23 @@ interface GrokChatViewProps {
   onToggleSettings: (bot: Bot) => void;
   /** Opens the Plugins dialog, optionally on one plugin's detail view. */
   onRequestPlugin: (slug?: string) => void;
+  /** Reasoning effort chosen from the settings panel. */
+  reasoningMode: 'think' | 'big_brain' | 'off';
+  /** Hides the header settings control while the panel is already open. */
+  isSettingsOpen: boolean;
 }
 
-export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatViewProps) => {
+export const GrokChatView = ({
+  onToggleSettings,
+  onRequestPlugin,
+  reasoningMode,
+  isSettingsOpen,
+}: GrokChatViewProps) => {
   const {
     currentUser,
     bots,
     conversations,
     selectedConversationId,
-    setSelectedConversationId,
     showToast,
     refreshData,
     theme,
@@ -175,7 +205,6 @@ export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatView
   // Plugin @ mention in the composer
   const [isPluginMentionOpen, setIsPluginMentionOpen] = useState(false);
   const [pluginMention, setPluginMention] = useState('');
-  const [reasoningMode, setReasoningMode] = useState<'think' | 'big_brain' | 'off'>('off');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -187,6 +216,19 @@ export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatView
   const currentConv = conversations.find((c) => c.id === selectedConversationId) || null;
   const inputText = currentConv ? drafts[currentConv.id] || '' : '';
   const isSending = currentConv ? sendingConversationIds.has(currentConv.id) : false;
+
+  // True once a real bot reply has landed in the thread, so the thinking
+  // indicator stops even while isSending is still being cleared.
+  const hasBotReply = (() => {
+    if (!currentConv) return false;
+    const last = messages[messages.length - 1];
+    return (
+      !!last &&
+      last.senderType === 'bot' &&
+      last.type === 'text' &&
+      last.content.trim().length > 0
+    );
+  })();
   const setInputText = (value: string) => {
     if (!currentConv) return;
     const conversationId = currentConv.id;
@@ -250,7 +292,8 @@ export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatView
     setMessages([]);
     setIsMessagesLoading(true);
     setMessageLoadError(false);
-    api.getMessages(currentConv.id)
+    api
+      .getMessages(currentConv.id)
       .then((loadedMessages) => {
         if (isCurrent) setMessages(loadedMessages);
       })
@@ -440,22 +483,6 @@ export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatView
     return true;
   });
 
-  // Status Indicator
-  const statusBadge =
-    activeBotInThread?.status === 'working' ? (
-      <span className="flex items-center space-x-1 text-[11px] font-semibold text-purple-400">
-        <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
-        <span>Working...</span>
-      </span>
-    ) : activeBotInThread?.status === 'waiting_approval' ? (
-      <span className="flex items-center space-x-1 text-[11px] font-semibold text-amber-400">
-        <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-        <span>Waiting for your approval</span>
-      </span>
-    ) : (
-      <span className="text-[11px] text-[#71767b]">Active</span>
-    );
-
   // Bot id taken from /workspace/chat/:botId
   const botIdFromUrl = useMemo(() => {
     const segments = path.split('/');
@@ -498,581 +525,513 @@ export const GrokChatView = ({ onToggleSettings, onRequestPlugin }: GrokChatView
     openChatWithBot(botIdFromUrl);
   }, [botIdFromUrl, bots, conversations, selectedConversationId, currentUser, navigate, openChatWithBot]);
 
+  const threadStartedAt = visibleMessages[0]?.timestamp || currentConv?.lastMessageAt;
+
+  const bubbleBase = 'max-w-[85%] rounded-[14px] px-4 py-2.5 text-[13px] leading-[1.5]';
+  const userBubble = isDark ? 'bg-[#f5f5f7] text-[#0b0b0c]' : 'bg-[#0b0b0c] text-white';
+  const botBubble = isDark ? 'bg-[#1c1c1f] text-[#f5f5f7]' : 'bg-[#f2f2f4] text-[#1c1c1e]';
+  const cardBase = isDark ? 'border-[#2c2c2f] bg-[#141416]' : 'border-[#e6e6e8] bg-white';
+  const mutedText = 'text-[#8e8e93]';
+
   return (
     <div
-      className={`flex-1 flex flex-col min-h-0 h-screen overflow-hidden transition-colors ${
-        isDark ? 'bg-[#0a0b0d] text-[#e7e9ea]' : 'bg-white text-[#0f1419]'
+      className={`flex-1 flex flex-col min-w-0 min-h-0 h-screen overflow-hidden transition-colors ${
+        isDark ? 'bg-[#0b0b0c] text-[#f5f5f7]' : 'bg-white text-[#1c1c1e]'
       }`}
     >
-      {/* Header Bar */}
+      {/* Header */}
       <header
-        className={`h-14 shrink-0 border-b px-6 flex items-center justify-between backdrop-blur-md sticky top-0 z-10 transition-colors ${
-          isDark
-            ? 'border-[#26292d] bg-[#0a0b0d]/90 text-white'
-            : 'border-[#e5e7eb] bg-white/90 text-[#0f1419]'
+        className={`h-14 shrink-0 border-b px-5 flex items-center justify-between ${
+          isDark ? 'border-[#232326]' : 'border-[#ededf0]'
         }`}
       >
-        <div className="flex items-center space-x-3 min-w-0">
+        <div className="flex min-w-0 items-center gap-2.5">
           <BotBlobAvatar
             name={activeBotInThread?.name || 'Chief'}
             avatarShape={activeBotInThread?.avatar}
             color={activeBotInThread?.color}
-            size={36}
+            size={28}
           />
-
-          <div className="min-w-0 text-left">
-            <div className="flex items-center space-x-2">
-              <h2 className="text-sm font-extrabold truncate">
-                {activeBotInThread?.name || 'Chief'}
-              </h2>
-              {activeBotInThread?.isChiefOfStaff && (
-                <span className="rounded-full bg-purple-500/10 border border-purple-500/30 text-purple-400 text-[9px] font-mono font-bold px-2 py-0.2 shrink-0">
-                  Chief
-                </span>
-              )}
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className={`text-[11px] truncate ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                {activeBotInThread?.roleTitle || 'Chief'}
-              </span>
-              <span className="text-[10px] text-[#71767b]">Â·</span>
-              {statusBadge}
-            </div>
-          </div>
+          <h2 className="truncate text-[15px] font-semibold">
+            {activeBotInThread?.name || 'Chief'}
+          </h2>
         </div>
 
-        {/* Right Actions */}
-        <div className="flex items-center space-x-2 shrink-0">
-          <button
-            onClick={() => showToast('Voice call feature active', 'info')}
-            className={`p-2 rounded-full transition ${
-              isDark ? 'hover:bg-[#16181c] text-[#71767b] hover:text-white' : 'hover:bg-[#f0f2f5] text-[#536471] hover:text-black'
-            }`}
-            title="Voice / Call"
-          >
-            <Mic className="h-4 w-4" />
-          </button>
-
+        {!isSettingsOpen && (
           <button
             onClick={() => activeBotInThread && onToggleSettings(activeBotInThread)}
-            className={`p-2 rounded-full transition ${
-              isDark ? 'hover:bg-[#16181c] text-[#71767b] hover:text-white' : 'hover:bg-[#f0f2f5] text-[#536471] hover:text-black'
+            className={`flex h-8 w-8 items-center justify-center rounded-full transition ${
+              isDark ? 'text-[#98989f] hover:bg-[#1c1c1f] hover:text-white' : 'text-[#8e8e93] hover:bg-[#f2f2f4] hover:text-[#1c1c1e]'
             }`}
             title="Bot settings"
             aria-label={`Settings for ${activeBotInThread?.name || 'bot'}`}
           >
-            <Settings className="h-4 w-4" />
+            <Settings className="h-[18px] w-[18px] stroke-[1.7]" />
           </button>
-        </div>
+        )}
       </header>
 
-      {/* Message Stream */}
-      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden no-scrollbar px-4 sm:px-6 py-5 space-y-5 max-w-3xl w-full mx-auto">
-        {(isWorkspaceLoading || isMessagesLoading) && messages.length === 0 ? (
-          <div
-            role="status"
-            aria-label="Loading conversation"
-            className="mx-auto flex min-h-[50vh] w-full max-w-xl flex-col justify-center gap-5"
-          >
-            <span className="sr-only">Loading conversationâ€¦</span>
-            <div className={`h-16 w-3/4 animate-pulse rounded-2xl ${isDark ? 'bg-[#181a1f]' : 'bg-[#f0f2f5]'}`} />
-            <div className={`ml-auto h-12 w-2/3 animate-pulse rounded-2xl ${isDark ? 'bg-[#202327]' : 'bg-[#e9edf0]'}`} />
-            <div className={`h-24 w-4/5 animate-pulse rounded-2xl ${isDark ? 'bg-[#181a1f]' : 'bg-[#f0f2f5]'}`} />
-            <div className="flex items-center justify-center gap-2 text-xs text-[#71767b]">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Loading conversation</span>
+      {/* Message stream */}
+      <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
+        <div className="mx-auto w-full max-w-[720px] px-5 py-5">
+          {threadStartedAt && visibleMessages.length > 0 && (
+            <div className={`pb-5 text-center text-[11px] font-medium ${mutedText}`}>
+              {chatTimeLabel(threadStartedAt)}
             </div>
-          </div>
-        ) : messageLoadError && messages.length === 0 ? (
-          <div role="alert" className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-center">
-            <p className={`text-sm ${isDark ? 'text-[#8b9299]' : 'text-[#536471]'}`}>
-              This conversation couldnâ€™t be loaded.
-            </p>
-            <button
-              onClick={() => void fetchMessages()}
-              className="rounded-full bg-purple-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-purple-500"
+          )}
+
+          {(isWorkspaceLoading || isMessagesLoading) && messages.length === 0 ? (
+            <div
+              role="status"
+              aria-label="Loading conversation"
+              className="mx-auto flex min-h-[45vh] w-full flex-col justify-center gap-3"
             >
-              Try again
-            </button>
-          </div>
-        ) : messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center min-h-[50vh] text-center space-y-4 pt-12">
-            <BotBlobAvatar
-              name={activeBotInThread?.name || 'Chief'}
-              avatarShape={activeBotInThread?.avatar}
-              color={activeBotInThread?.color}
-              size={64}
-            />
+              <span className="sr-only">Loading conversation…</span>
+              <div className={`h-16 w-3/4 animate-pulse rounded-[14px] ${isDark ? 'bg-[#1c1c1f]' : 'bg-[#f2f2f4]'}`} />
+              <div className={`ml-auto h-11 w-2/3 animate-pulse rounded-[14px] ${isDark ? 'bg-[#26262a]' : 'bg-[#e6e6e8]'}`} />
+              <div className={`h-20 w-4/5 animate-pulse rounded-[14px] ${isDark ? 'bg-[#1c1c1f]' : 'bg-[#f2f2f4]'}`} />
+              <div className="skip flex items-center justify-center gap-2 text-[11px] text-[#8e8e93]">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>Loading conversation</span>
+              </div>
+            </div>
+          ) : messageLoadError && messages.length === 0 ? (
+            <div role="alert" className="flex min-h-[45vh] flex-col items-center justify-center gap-3 text-center">
+              <p className={`text-[13px] ${mutedText}`}>This conversation couldn't be loaded.</p>
+              <button
+                onClick={() => void fetchMessages()}
+                className={`rounded-full px-4 py-2 text-[12px] font-semibold transition ${
+                  isDark ? 'bg-[#f5f5f7] text-[#0b0b0c] hover:bg-white' : 'bg-[#0b0b0c] text-white hover:bg-[#27272a]'
+                }`}
+              >
+                Try again
+              </button>
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="flex min-h-[45vh] flex-col items-center justify-center gap-4 text-center">
+              <BotBlobAvatar
+                name={activeBotInThread?.name || 'Chief'}
+                avatarShape={activeBotInThread?.avatar}
+                color={activeBotInThread?.color}
+                size={56}
+              />
 
-            <div className="space-y-1 max-w-md">
-              <h2 className="text-xl font-extrabold tracking-tight">
-                {activeBotInThread?.name || 'Chief'}
-              </h2>
-              <p className={`text-xs ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                {activeBotInThread?.roleTitle || 'Chief'}
-              </p>
-              {activeBotInThread?.systemPrompt && (
-                <p className={`text-xs italic pt-2 ${isDark ? 'text-[#8b9299]' : 'text-[#536471]'}`}>
-                  "{activeBotInThread.systemPrompt}"
+              <div className="max-w-md space-y-1">
+                <h2 className="text-[17px] font-semibold tracking-tight">
+                  {activeBotInThread?.name || 'Chief'}
+                </h2>
+                <p className={`text-[12px] ${mutedText}`}>
+                  {activeBotInThread?.roleTitle || 'Chief'}
                 </p>
-              )}
+                {activeBotInThread?.systemPrompt && (
+                  <p className={`pt-2 text-[12px] leading-relaxed ${mutedText}`}>
+                    {activeBotInThread.systemPrompt}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex max-w-lg flex-wrap items-center justify-center gap-2 pt-1">
+                <button
+                  onClick={() => handleSendMessage('What can you help me with?')}
+                  className={`rounded-full px-3.5 py-2 text-[12px] font-medium transition ${
+                    isDark ? 'bg-[#1c1c1f] text-[#f5f5f7] hover:bg-[#26262a]' : 'bg-[#f2f2f4] text-[#1c1c1e] hover:bg-[#e9e9eb]'
+                  }`}
+                >
+                  What can you help me with?
+                </button>
+                <button
+                  onClick={() => handleSendMessage('Search the web for the latest news')}
+                  className={`rounded-full px-3.5 py-2 text-[12px] font-medium transition ${
+                    isDark ? 'bg-[#1c1c1f] text-[#f5f5f7] hover:bg-[#26262a]' : 'bg-[#f2f2f4] text-[#1c1c1e] hover:bg-[#e9e9eb]'
+                  }`}
+                >
+                  Search the web
+                </button>
+              </div>
             </div>
+          ) : (
+            <div className="space-y-2">
+              {visibleMessages.map((msg) => {
+                const isUser = msg.senderType === 'user';
+                const toolCall = msg.metadata?.toolCall;
+                const toolName = toolCall?.toolName;
+                const isDelegation = toolName === DELEGATE_TOOL;
+                const isWorkspaceToolCall = toolName !== undefined && WORKSPACE_TOOL_LABELS[toolName] !== undefined;
+                const attachment = msg.metadata?.attachment;
 
-            {/* Suggested prompts */}
-            <div className="flex flex-wrap items-center justify-center gap-2 pt-3 max-w-lg">
-              <button
-                onClick={() => handleSendMessage('What can you help me with?')}
-                className={`px-3 py-1.5 rounded-full border text-xs font-semibold transition ${
-                  isDark
-                    ? 'border-[#26292d] bg-[#121418] text-[#e7e9ea] hover:bg-[#1c1e22]'
-                    : 'border-[#e5e7eb] bg-[#f8f9fa] text-[#0f1419] hover:bg-[#e5e7eb]'
-                }`}
-              >
-                What can you help me with?
-              </button>
-              <button
-                onClick={() => handleSendMessage('Search the web for the latest news')}
-                className={`px-3 py-1.5 rounded-full border text-xs font-semibold transition ${
-                  isDark
-                    ? 'border-[#26292d] bg-[#121418] text-[#e7e9ea] hover:bg-[#1c1e22]'
-                    : 'border-[#e5e7eb] bg-[#f8f9fa] text-[#0f1419] hover:bg-[#e5e7eb]'
-                }`}
-              >
-                Search the web
-              </button>
-            </div>
-          </div>
-        ) : (
-          visibleMessages.map((msg) => {
-            const isUser = msg.senderType === 'user';
-            // Tool identity for this message, so card conditions stay readable
-            const toolCall = msg.metadata?.toolCall;
-            const toolName = toolCall?.toolName;
-            const isDelegation = toolName === DELEGATE_TOOL;
-            const isWorkspaceToolCall = toolName !== undefined && WORKSPACE_TOOL_LABELS[toolName] !== undefined;
-
-            return (
-              <div
-                key={msg.id}
-                className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} space-y-1`}
-              >
-                {/* Sender Title */}
-                <div className="flex items-center space-x-2 px-1 text-[11px] opacity-70">
-                  <span className="font-bold">{isUser ? currentUser.name : msg.senderName}</span>
-                  <span>
-                    {new Date(msg.timestamp).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                </div>
-
-                {/* Message Bubble */}
-                {msg.type === 'text' && (
+                return (
                   <div
-                    className={`max-w-xl text-xs sm:text-sm p-3.5 px-4 rounded-[20px] leading-relaxed group relative ${
-                      isUser
-                        ? isDark
-                          ? 'bg-[#1e2025] text-white rounded-tr-md'
-                          : 'bg-[#0f1419] text-white rounded-tr-md shadow-sm'
-                        : isDark
-                        ? 'bg-[#181a1f] text-[#e7e9ea] rounded-tl-md'
-                        : 'bg-[#f0f2f5] text-[#0f1419] rounded-tl-md'
-                    }`}
+                    key={msg.id}
+                    className={`flex flex-col gap-2 ${isUser ? 'items-end' : 'items-start'}`}
                   >
-                    {/* Bot replies render markdown; the user's own text stays literal */}
-                    {isUser ? (
-                      <p className="whitespace-pre-wrap">{msg.content}</p>
-                    ) : (
-                      <Markdown content={msg.content} isDark={isDark} />
-                    )}
-
-                    {!isUser && (
-                      <button
-                        onClick={() => handleCopyMessage(msg.id, msg.content)}
-                        className={`absolute top-2 right-2 p-1 rounded-full opacity-0 group-hover:opacity-100 transition ${
-                          isDark ? 'hover:bg-[#202327] text-[#71767b]' : 'hover:bg-white text-[#536471]'
-                        }`}
-                        title="Copy"
-                      >
-                        {copiedMessageId === msg.id ? (
-                          <Check className="h-3 w-3 text-emerald-400" />
+                    {msg.type === 'text' && (
+                      <div className={`group relative ${bubbleBase} ${isUser ? userBubble : botBubble}`}>
+                        {isUser ? (
+                          <p className="whitespace-pre-wrap">{msg.content}</p>
                         ) : (
-                          <Copy className="h-3 w-3" />
+                          <Markdown content={msg.content} isDark={isDark} />
                         )}
-                      </button>
-                    )}
-                  </div>
-                )}
 
-                {/* Delegation card â€” Chief handing work to a specialist */}
-                {msg.type === 'tool_call' && isDelegation && toolCall && (
-                  <div
-                    className={`w-full max-w-xl rounded-2xl border p-3 text-xs ${
-                      isDark ? 'border-[#2f3336] bg-[#121418]' : 'border-[#e5e7eb] bg-[#f8f9fa]'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2">
-                      <GitBranch className="h-3.5 w-3.5 shrink-0 text-purple-400" />
-                      <span className="font-bold">
-                        Delegated to {String(toolCall.args?.bot_name || 'a specialist')}
-                      </span>
-                    </div>
-                    {toolCall.args?.brief && (
-                      <p className={`mt-1.5 leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                        {String(toolCall.args.brief)}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {/* Workspace-management card â€” Chief adding bots / plugins */}
-                {msg.type === 'tool_call' && isWorkspaceToolCall && toolCall && (
-                  <div
-                    className={`w-full max-w-xl rounded-2xl border p-3 text-xs ${
-                      isDark ? 'border-[#2f3336] bg-[#121418]' : 'border-[#e5e7eb] bg-[#f8f9fa]'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2">
-                      <Wrench className="h-3.5 w-3.5 shrink-0 text-purple-400" />
-                      <span className="font-bold">{WORKSPACE_TOOL_LABELS[toolName!]}</span>
-                    </div>
-                    {summariseWorkspaceArgs(toolName!, toolCall.args) && (
-                      <p className={`mt-1.5 text-[11px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                        {summariseWorkspaceArgs(toolName!, toolCall.args)}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {/* Tool Call Card */}
-                {msg.type === 'tool_call' && toolCall && !isDelegation && !isWorkspaceToolCall && (
-                  <div
-                    className={`w-full max-w-xl rounded-2xl border p-3 text-xs font-mono ${
-                      isDark ? 'border-[#26292d] bg-[#121418]' : 'border-[#e5e7eb] bg-[#f8f9fa]'
-                    }`}
-                  >
-                    <button
-                      onClick={() => toggleToolCallExpanded(msg.metadata!.toolCall!.callId)}
-                      className="w-full flex items-center justify-between"
-                    >
-                      <div className="flex items-center space-x-2">
-                        <Terminal className="h-3.5 w-3.5 text-purple-400" />
-                        <span>Invoking tool: <strong>{toolCall.toolName}</strong></span>
-                      </div>
-                      <span className={`text-[10px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                        {expandedToolCalls[toolCall.callId] ? 'Hide' : 'Inspect'}
-                      </span>
-                    </button>
-                    {expandedToolCalls[toolCall.callId] && (
-                      <pre
-                        className={`mt-2 p-2 rounded-lg border font-mono text-[10px] overflow-x-auto ${
-                          isDark ? 'bg-black border-[#26292d] text-[#71767b]' : 'bg-white border-[#e5e7eb] text-[#536471]'
-                        }`}
-                      >
-                        {JSON.stringify(toolCall.args, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                )}
-
-                {/* Tool result - the real payload a tool returned. Hidden when
-                    this message is really a "connect this service" prompt, which
-                    has its own card below. */}
-                {msg.type === 'tool_result' && msg.metadata?.toolResult && !msg.metadata?.missingPluginSlug && (
-                  <div
-                    className={`w-full max-w-xl rounded-2xl border p-3 text-xs space-y-2 ${
-                      msg.metadata.toolResult.status === 'error'
-                        ? isDark
-                          ? 'border-rose-500/40 bg-rose-500/5'
-                          : 'border-rose-200 bg-rose-50'
-                        : isDark
-                          ? 'border-[#26292d] bg-[#121418]'
-                          : 'border-[#e5e7eb] bg-[#f8f9fa]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2">
-                        {msg.metadata.toolResult.status === 'error' ? (
-                          <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-                        ) : (
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                        {!isUser && (
+                          <button
+                            onClick={() => handleCopyMessage(msg.id, msg.content)}
+                            className={`absolute -right-8 top-1.5 rounded-full p-1 opacity-0 transition group-hover:opacity-100 ${
+                              isDark ? 'text-[#8e8e93] hover:bg-[#1c1c1f] hover:text-white' : 'text-[#8e8e93] hover:bg-[#f2f2f4] hover:text-[#1c1c1e]'
+                            }`}
+                            title="Copy"
+                          >
+                            {copiedMessageId === msg.id ? (
+                              <Check className="h-3 w-3 text-[#30d158]" />
+                            ) : (
+                              <Copy className="h-3 w-3" />
+                            )}
+                          </button>
                         )}
-                        <span className="font-mono font-bold text-[11px]">
-                          {msg.metadata.toolResult.toolName}{' '}
-                          {msg.metadata.toolResult.status === 'error' ? 'failed' : 'result'}
-                        </span>
                       </div>
-                      {msg.metadata.toolResult.durationMs ? (
-                        <span className={`text-[10px] font-mono ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                          {msg.metadata.toolResult.durationMs}ms
-                        </span>
-                      ) : null}
-                    </div>
-
-                    {/* Render images for image-generation tools */}
-                    {msg.metadata.toolResult.toolName?.startsWith('image-generation.') ? (
-                      renderImageResult(msg.metadata.toolResult.result, isDark)
-                    ) : (
-                      <pre
-                        className={`overflow-x-auto rounded-xl border p-2.5 font-mono text-[10px] max-h-56 ${
-                          isDark ? 'border-[#26292d] bg-black text-[#e7e9ea]' : 'border-[#e5e7eb] bg-white text-[#0f1419]'
-                        }`}
-                      >
-                        {typeof msg.metadata.toolResult.result === 'object'
-                          ? JSON.stringify(msg.metadata.toolResult.result, null, 2)
-                          : String(msg.metadata.toolResult.result ?? '')}
-                      </pre>
-                    )}
-                  </div>
-                )}
-
-                {/* "Connect this service" â€” the bot needs a plugin you don't have */}
-                {msg.type === 'tool_result' && msg.metadata?.missingPluginSlug && (
-                  <button
-                    onClick={() => onRequestPlugin(msg.metadata!.missingPluginSlug!)}
-                    className={`w-full max-w-xl flex items-center justify-between rounded-2xl border border-dashed p-3 text-left transition ${
-                      isDark ? 'border-[#536471] hover:bg-[#181a1f]' : 'border-[#cfd9de] hover:bg-[#f7f9f9]'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2.5 min-w-0">
-                      <PluginLogo slug={msg.metadata.missingPluginSlug} size={22} />
-                      <div className="min-w-0">
-                        <p className="text-[11px] font-bold">
-                          Connect {pluginNameFor(msg.metadata.missingPluginSlug) || msg.metadata.missingPluginSlug}
-                        </p>
-                        <p className={`text-[10px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                          Opening the Plugins dialog so you can add it
-                        </p>
-                      </div>
-                    </div>
-                    <ChevronRight className="h-4 w-4 shrink-0 text-[#71767b]" />
-                  </button>
-                )}
-
-                {/* System notice â€” e.g. why the AI couldn't answer */}
-                {msg.type === 'system' && (
-                  <div
-                    className={`w-full max-w-xl flex items-start space-x-2 rounded-2xl border px-3.5 py-2.5 text-[11px] font-medium ${
-                      isDark
-                        ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
-                        : 'border-amber-200 bg-amber-50 text-amber-800'
-                    }`}
-                  >
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span className="leading-relaxed">{msg.content}</span>
-                  </div>
-                )}
-
-                {/* Approval Request Card â€” sensitive tool waits here */}
-                {msg.type === 'approval_request' && msg.metadata?.approvalId && (
-                  <div
-                    className={`w-full max-w-xl rounded-2xl border-2 p-4 text-xs space-y-3 shadow-xl ${
-                      isDark ? 'border-amber-500/60 bg-[#16181c]' : 'border-amber-400 bg-amber-50/60'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-2 text-amber-500 font-bold uppercase tracking-wider text-[11px]">
-                      <ShieldAlert className="h-4 w-4" />
-                      <span>Human Authorization Required</span>
-                    </div>
-                    <p className="text-xs leading-relaxed">{msg.content}</p>
-
-                    {msg.metadata.toolParams && (
-                      <pre
-                        className={`overflow-x-auto rounded-xl border p-2.5 font-mono text-[10px] ${
-                          isDark ? 'border-[#2f3336] bg-black' : 'border-amber-200 bg-white'
-                        }`}
-                      >
-                        {JSON.stringify(msg.metadata.toolParams, null, 2)}
-                      </pre>
                     )}
 
-                    {/* Resolved approvals stay visible but stop taking clicks */}
-                    {resolvingApprovalId === msg.metadata.approvalId ? (
-                      <div className="flex items-center space-x-2 text-[11px] text-[#71767b]">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        <span>Running...</span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center justify-end space-x-2 pt-1">
-                        <button
-                          onClick={() => handleRejectApproval(msg.metadata!.approvalId!)}
-                          className="rounded-full border border-rose-500/40 bg-rose-500/10 px-3.5 py-1.5 text-[11px] font-bold text-rose-400 transition hover:bg-rose-500/20"
-                        >
-                          Reject
-                        </button>
-                        <button
-                          onClick={() => handleApproveApproval(msg.metadata!.approvalId!)}
-                          className={`rounded-full border px-3.5 py-1.5 text-[11px] font-bold transition ${
-                            isDark ? 'border-[#2f3336] bg-[#202327]' : 'border-[#cfd9de] bg-white'
+                    {/* File attachment carried with a message */}
+                    {msg.type === 'text' && attachment && (
+                      <div
+                        className={`flex w-full max-w-[320px] items-center gap-3 rounded-[10px] border p-2.5 ${
+                          isDark ? 'border-[#2c2c2f] bg-[#141416]' : 'border-[#e6e6e8] bg-white'
+                        }`}
+                      >
+                        <div
+                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                            isDark ? 'bg-[#26262a]' : 'bg-[#f2f2f4]'
                           }`}
                         >
-                          Approve & Run
+                          <FileText className="h-4 w-4 text-[#ff453a]" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12px] font-semibold">{attachment.fileName}</p>
+                          <p className={`text-[10px] ${mutedText}`}>
+                            {[attachment.pageCount ? `${attachment.pageCount} pages` : null, attachment.fileSize]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </p>
+                        </div>
+                        {attachment.url ? (
+                          <a
+                            href={attachment.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            download={attachment.fileName}
+                            className={`shrink-0 rounded-full p-1.5 transition ${
+                              isDark ? 'text-[#98989f] hover:bg-[#26262a] hover:text-white' : 'text-[#8e8e93] hover:bg-[#f2f2f4] hover:text-[#1c1c1e]'
+                            }`}
+                            aria-label={`Download ${attachment.fileName}`}
+                          >
+                            <Download className="h-4 w-4" />
+                          </a>
+                        ) : (
+                          <Download className={`h-4 w-4 shrink-0 ${isDark ? 'text-[#48484a]' : 'text-[#c7c7cc]'}`} />
+                        )}
+                      </div>
+                    )}
+
+                    {/* Delegation card - Chief handing work to a specialist */}
+                    {msg.type === 'tool_call' && isDelegation && toolCall && (
+                      <div className={`w-full max-w-[420px] rounded-[10px] border p-3 text-[12px] ${cardBase}`}>
+                        <div className="flex items-center gap-2">
+                          <GitBranch className="h-3.5 w-3.5 shrink-0 text-[#bf5af2]" />
+                          <span className="font-semibold">
+                            Delegated to {String(toolCall.args?.bot_name || 'a specialist')}
+                          </span>
+                        </div>
+                        {toolCall.args?.brief && (
+                          <p className={`mt-1.5 leading-relaxed ${mutedText}`}>{String(toolCall.args.brief)}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Workspace-management card - Chief adding bots / plugins */}
+                    {msg.type === 'tool_call' && isWorkspaceToolCall && toolCall && (
+                      <div className={`w-full max-w-[420px] rounded-[10px] border p-3 text-[12px] ${cardBase}`}>
+                        <div className="flex items-center gap-2">
+                          <Wrench className="h-3.5 w-3.5 shrink-0 text-[#bf5af2]" />
+                          <span className="font-semibold">{WORKSPACE_TOOL_LABELS[toolName!]}</span>
+                        </div>
+                        {summariseWorkspaceArgs(toolName!, toolCall.args) && (
+                          <p className={`mt-1.5 text-[11px] ${mutedText}`}>
+                            {summariseWorkspaceArgs(toolName!, toolCall.args)}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Tool call card */}
+                    {msg.type === 'tool_call' && toolCall && !isDelegation && !isWorkspaceToolCall && (
+                      <div className={`w-full max-w-[420px] rounded-[10px] border p-3 text-[12px] font-mono ${cardBase}`}>
+                        <button
+                          onClick={() => toggleToolCallExpanded(msg.metadata!.toolCall!.callId)}
+                          className="flex w-full items-center justify-between"
+                        >
+                          <span className="flex items-center gap-2">
+                            <Terminal className="h-3.5 w-3.5 text-[#bf5af2]" />
+                            <span>
+                              Invoking tool: <strong>{toolCall.toolName}</strong>
+                            </span>
+                          </span>
+                          <span className={`text-[10px] ${mutedText}`}>
+                            {expandedToolCalls[toolCall.callId] ? 'Hide' : 'Inspect'}
+                          </span>
                         </button>
+                        {expandedToolCalls[toolCall.callId] && (
+                          <pre
+                            className={`mt-2 overflow-x-auto rounded-lg border p-2 font-mono text-[10px] ${
+                              isDark ? 'border-[#2c2c2f] bg-black text-[#98989f]' : 'border-[#e6e6e8] bg-[#fafafa] text-[#6e6e73]'
+                            }`}
+                          >
+                            {JSON.stringify(toolCall.args, null, 2)}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Tool result - the real payload a tool returned. Hidden when
+                        this message is really a "connect this service" prompt, which
+                        has its own card below. */}
+                    {msg.type === 'tool_result' && msg.metadata?.toolResult && !msg.metadata?.missingPluginSlug && (
+                      <div
+                        className={`w-full max-w-[420px] space-y-2 rounded-[10px] border p-3 text-[12px] ${
+                          msg.metadata.toolResult.status === 'error'
+                            ? 'border-[#ff6961]/40 bg-[#ff6961]/5'
+                            : cardBase
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            {msg.metadata.toolResult.status === 'error' ? (
+                              <XCircle className="h-3.5 w-3.5 shrink-0 text-[#ff453a]" />
+                            ) : (
+                              <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#30d158]" />
+                            )}
+                            <span className="font-mono text-[11px] font-semibold">
+                              {msg.metadata.toolResult.toolName}{' '}
+                              {msg.metadata.toolResult.status === 'error' ? 'failed' : 'result'}
+                            </span>
+                          </div>
+                          {msg.metadata.toolResult.durationMs ? (
+                            <span className={`text-[10px] font-mono ${mutedText}`}>
+                              {msg.metadata.toolResult.durationMs}ms
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <pre
+                            className={`max-h-56 overflow-x-auto rounded-lg border p-2.5 font-mono text-[10px] ${
+                              isDark ? 'border-[#2c2c2f] bg-black text-[#f5f5f7]' : 'border-[#e6e6e8] bg-white text-[#1c1c1e]'
+                            }`}
+                          >
+                            {typeof msg.metadata.toolResult.result === 'object'
+                              ? JSON.stringify(msg.metadata.toolResult.result, null, 2)
+                              : String(msg.metadata.toolResult.result ?? '')}
+                          </pre>
+                      </div>
+                    )}
+
+                    {/* "Connect this service" - the bot needs a plugin you don't have */}
+                    {msg.type === 'tool_result' && msg.metadata?.missingPluginSlug && (
+                      <button
+                        onClick={() => onRequestPlugin(msg.metadata!.missingPluginSlug!)}
+                        className={`flex w-full max-w-[420px] items-center justify-between rounded-[10px] border border-dashed p-3 text-left transition ${
+                          isDark ? 'border-[#48484a] hover:bg-[#1c1c1f]' : 'border-[#d1d1d6] hover:bg-[#f7f7f8]'
+                        }`}
+                      >
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <PluginLogo slug={msg.metadata.missingPluginSlug} size={22} />
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-semibold">
+                              Connect {pluginNameFor(msg.metadata.missingPluginSlug) || msg.metadata.missingPluginSlug}
+                            </p>
+                            <p className={`text-[10px] ${mutedText}`}>Opening the Plugins dialog so you can add it</p>
+                          </div>
+                        </div>
+                        <ChevronRight className="h-4 w-4 shrink-0 text-[#8e8e93]" />
+                      </button>
+                    )}
+
+                    {/* System notice - e.g. why the AI couldn't answer */}
+                    {msg.type === 'system' && (
+                      <div
+                        className={`flex w-full max-w-[420px] items-start gap-2 rounded-[10px] border px-3.5 py-2.5 text-[11px] font-medium ${
+                          isDark
+                            ? 'border-[#5c4a1f] bg-[#2a220f] text-[#ffd60a]'
+                            : 'border-[#f0d9a8] bg-[#fff8e8] text-[#8a6100]'
+                        }`}
+                      >
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span className="leading-relaxed">{msg.content}</span>
+                      </div>
+                    )}
+
+                    {/* Approval request card - a sensitive tool waits here */}
+                    {msg.type === 'approval_request' && msg.metadata?.approvalId && (
+                      <div
+                        className={`w-full max-w-[460px] space-y-3 rounded-[10px] border p-4 text-[12px] ${
+                          isDark ? 'border-[#5c4a1f] bg-[#1c1911]' : 'border-[#f0d9a8] bg-[#fffaf0]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-[#ff9f0a]">
+                          <ShieldAlert className="h-4 w-4" />
+                          <span>Human authorization required</span>
+                        </div>
+                        <p className="text-[12px] leading-relaxed">{msg.content}</p>
+
+                        {msg.metadata.toolParams && (
+                          <pre
+                            className={`overflow-x-auto rounded-lg border p-2.5 font-mono text-[10px] ${
+                              isDark ? 'border-[#2c2c2f] bg-black' : 'border-[#f0d9a8] bg-white'
+                            }`}
+                          >
+                            {JSON.stringify(msg.metadata.toolParams, null, 2)}
+                          </pre>
+                        )}
+
+                        {/* Resolved approvals stay visible but stop taking clicks */}
+                        {resolvingApprovalId === msg.metadata.approvalId ? (
+                          <div className={`flex items-center gap-2 text-[11px] ${mutedText}`}>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <span>Running…</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-end gap-2 pt-1">
+                            <button
+                              onClick={() => handleRejectApproval(msg.metadata!.approvalId!)}
+                              className={`rounded-full px-3.5 py-1.5 text-[11px] font-semibold transition ${
+                                isDark ? 'bg-[#2c2c2f] text-[#ff6961] hover:bg-[#333336]' : 'bg-[#f2f2f4] text-[#ff453a] hover:bg-[#e9e9eb]'
+                              }`}
+                            >
+                              Reject
+                            </button>
+                            <button
+                              onClick={() => handleApproveApproval(msg.metadata!.approvalId!)}
+                              className={`rounded-full px-3.5 py-1.5 text-[11px] font-semibold transition ${
+                                isDark ? 'bg-[#f5f5f7] text-[#0b0b0c] hover:bg-white' : 'bg-[#0b0b0c] text-white hover:bg-[#27272a]'
+                              }`}
+                            >
+                              Approve & Run
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
-                )}
-              </div>
-            );
-          })
-        )}
-        {/* Reply in progress - keeps the wait visibly alive */}
-        {isSending && !isMessagesLoading && (
-          <ThinkingIndicator bot={activeBotInThread} isDark={isDark} />
-        )}
-        <div ref={messagesEndRef} />
+                );
+              })}
+            </div>
+          )}
+
+          {/* Reply in progress - keeps the wait visibly alive */}
+          {isSending && !isMessagesLoading && !hasBotReply && <div className="pt-3"><ThinkingIndicator isDark={isDark} /></div>}
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      {/* Composer â€” in normal flow, so the message list can never slide under it */}
-      <div className="shrink-0 relative w-full max-w-3xl mx-auto px-4 pt-2 pb-4">
-        {/* Plugin mention list, opened by typing @ */}
-        {isPluginMentionOpen && (
+      {/* Composer */}
+      <div className="relative w-full shrink-0">
+        <div className="mx-auto w-full max-w-[720px] px-5 pb-5 pt-2">
+          {/* Plugin mention list, opened by typing @ */}
+          {isPluginMentionOpen && (
+            <div
+              className={`absolute bottom-full left-5 z-30 mb-1 w-64 rounded-[10px] border p-2 shadow-lg ${
+                isDark ? 'border-[#2c2c2f] bg-[#1c1c1f] text-[#f5f5f7]' : 'border-[#e6e6e8] bg-white text-[#1c1c1e]'
+              }`}
+            >
+              <p className={`px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider ${mutedText}`}>
+                Connected plugins
+              </p>
+              {installedPlugins.length === 0 ? (
+                <p className={`px-2 py-2 text-[11px] ${mutedText}`}>
+                  Nothing connected yet - open Plugins to add one.
+                </p>
+              ) : (
+                <div className="space-y-0.5">
+                  {plugins
+                    .filter(
+                      (p) =>
+                        installedPlugins.some((i) => i.pluginSlug === p.slug) &&
+                        (p.name.toLowerCase().includes(pluginMention) ||
+                          p.slug.toLowerCase().includes(pluginMention))
+                    )
+                    .map((p) => (
+                      <button
+                        key={p.slug}
+                        onClick={() => insertPluginMention(p.slug)}
+                        className={`flex w-full items-center gap-2 rounded-lg p-1.5 text-left transition ${
+                          isDark ? 'hover:bg-[#26262a]' : 'hover:bg-[#f2f2f4]'
+                        }`}
+                      >
+                        <PluginLogo slug={p.slug} size={20} />
+                        <span className="text-[11px] font-medium">{p.name}</span>
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div
-            className={`absolute bottom-full left-4 z-30 mb-2 w-64 rounded-2xl border shadow-xl p-2 ${
-              isDark ? 'bg-[#16181c] border-[#26292d] text-white' : 'bg-white border-[#e5e7eb] text-black'
+            className={`flex items-end gap-2 rounded-full border py-1.5 pl-2 pr-2 transition ${
+              isDark
+                ? 'border-[#2c2c2f] bg-[#141416] focus-within:border-[#3a3a3d]'
+                : 'border-[#e6e6e8] bg-white shadow-[0_2px_12px_rgba(0,0,0,0.05)] focus-within:border-[#d1d1d6]'
             }`}
           >
-            <p className={`px-2 pb-1 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-[#71767b]' : 'text-[#8b98a5]'}`}>
-              Connected plugins
-            </p>
-            {installedPlugins.length === 0 ? (
-              <p className={`px-2 py-2 text-[11px] ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                Nothing connected yet - open Plugins to add one.
-              </p>
-            ) : (
-              <div className="space-y-0.5">
-                {plugins
-                  .filter(
-                    (p) =>
-                      installedPlugins.some((i) => i.pluginSlug === p.slug) &&
-                      (p.name.toLowerCase().includes(pluginMention) || p.slug.toLowerCase().includes(pluginMention))
-                  )
-                  .map((p) => (
-                    <button
-                      key={p.slug}
-                      onClick={() => insertPluginMention(p.slug)}
-                      className={`flex w-full items-center space-x-2 rounded-xl p-1.5 text-left transition ${
-                        isDark ? 'hover:bg-[#202327]' : 'hover:bg-[#f0f2f5]'
-                      }`}
-                    >
-                      <PluginLogo slug={p.slug} size={20} />
-                      <span className="text-[11px] font-semibold">{p.name}</span>
-                    </button>
-                  ))}
-              </div>
-            )}
-          </div>
-        )}
-        {/* Soft fade so messages scrolling away look intentional */}
-        <div
-          className={`pointer-events-none absolute inset-x-0 -top-8 h-8 bg-gradient-to-t to-transparent ${
-            isDark ? 'from-[#0a0b0d]' : 'from-white'
-          }`}
-        />
-        <div
-          className={`flex flex-col items-end space-x-2 p-2 px-3 rounded-full border shadow-xl transition-all ${
-            isDark
-              ? 'bg-[#16181c] border-[#26292d] focus-within:border-[#536471]'
-              : 'bg-white border-[#e5e7eb] focus-within:border-[#cfd9de]'
-          }`}
-        >
-          {/* Reasoning Mode Selector - Grok-style Think/Big Brain */}
-          <div className="flex items-center space-x-1 px-1">
-            {(['off', 'think', 'big_brain'] as const).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => setReasoningMode(mode)}
-                className={`flex items-center space-x-1 rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
-                  reasoningMode === mode
-                    ? isDark
-                      ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/30'
-                      : 'bg-[#0f1419] text-white shadow-lg shadow-black/30'
-                    : isDark
-                    ? 'text-[#71767b] hover:text-white hover:bg-[#202327]'
-                    : 'text-[#536471] hover:text-black hover:bg-[#f0f2f5]'
-                }`}
-                title={
-                  mode === 'off'
-                    ? 'Standard'
-                    : mode === 'think'
-                    ? 'Think — deeper reasoning'
-                    : 'Big Brain — maximum reasoning'
-                }
-              >
-                {mode === 'off' && <span>Standard</span>}
-                {mode === 'think' && (
-                  <>
-                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M9 18V5l12-2v13" />
-                      <circle cx="6" cy="18" r="3" />
-                      <path d="M9 22a5 5 0 0 1-5-5v-2a5 5 0 0 1 5-5h10a5 5 0 0 1 5 5v2a5 5 0 0 1-5 5H9z" />
-                    </svg>
-                    <span>Think</span>
-                  </>
-                )}
-                {mode === 'big_brain' && (
-                  <>
-                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 2a10 10 0 1 0 10 10" />
-                      <path d="M12 16v-4" />
-                      <path d="M12 8h.01" />
-                      <path d="M8 14s.5-2 4-2 4 2 4 2" />
-                    </svg>
-                    <span>Big Brain</span>
-                  </>
-                )}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-end space-x-2 w-full">
             <button
               onClick={() => showToast('Attachment options open', 'info')}
-              className={`p-2 rounded-full transition shrink-0 ${
-                isDark ? 'text-[#71767b] hover:text-white hover:bg-[#202327]' : 'text-[#536471] hover:text-black hover:bg-[#f0f2f5]'
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition ${
+                isDark
+                  ? 'bg-[#26262a] text-[#f5f5f7] hover:bg-[#2f2f33]'
+                  : 'bg-[#f2f2f4] text-[#3a3a3c] hover:bg-[#e9e9eb]'
               }`}
               title="Attach files or triggers"
+              aria-label="Attach"
             >
-              <Plus className="h-5 w-5 stroke-[2.5]" />
+              <Plus className="h-[18px] w-[18px] stroke-[2]" />
             </button>
 
             <textarea
-            ref={textareaRef}
-            rows={1}
-            value={inputText}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-            placeholder={`Message ${activeBotInThread?.name || 'Chief'}...`}
-            className="flex-1 bg-transparent border-none text-xs sm:text-sm focus:outline-none resize-none max-h-36 py-2 px-1 placeholder:text-[#71767b]"
-          />
-
-          <div className="flex items-center space-x-1.5 shrink-0">
-            <button
-              onClick={() => showToast('Voice dictation active', 'info')}
-              className="h-9 w-9 rounded-full bg-black text-white flex items-center justify-center transition hover:scale-105 shadow-sm shrink-0"
-              title="Voice Input"
-            >
-              <Mic className="h-4 w-4" />
-            </button>
+              ref={textareaRef}
+              rows={1}
+              value={inputText}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder={`Message ${activeBotInThread?.name || 'Chief'}`}
+              className={`max-h-32 flex-1 resize-none bg-transparent py-2 text-[13px] leading-relaxed outline-none placeholder:text-[#8e8e93]`}
+            />
 
             {inputText.trim() && (
               <button
                 onClick={() => handleSendMessage()}
                 disabled={isSending}
-                className={`h-9 w-9 rounded-full flex items-center justify-center transition shrink-0 ${
-                  isDark ? 'bg-white text-black hover:bg-[#e7e9ea]' : 'bg-[#0f1419] text-white hover:bg-[#272c30]'
+                className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition ${
+                  isDark ? 'bg-[#f5f5f7] text-[#0b0b0c] hover:bg-white' : 'bg-[#0b0b0c] text-white hover:bg-[#27272a]'
                 }`}
                 title="Send Message"
+                aria-label="Send message"
               >
-                <ArrowUp className="h-4 w-4 stroke-[2.5]" />
+                <ArrowUp className="h-4 w-4 stroke-[2.2]" />
               </button>
             )}
+
+            <button
+              onClick={() => showToast('Voice dictation active', 'info')}
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition ${
+                isDark ? 'bg-[#f5f5f7] text-[#0b0b0c] hover:bg-white' : 'bg-[#0b0b0c] text-white hover:bg-[#27272a]'
+              }`}
+              title="Voice Input"
+              aria-label="Voice input"
+            >
+              <Mic className="h-4 w-4" />
+            </button>
           </div>
         </div>
-      </div>
       </div>
     </div>
   );
 };
+
 export default GrokChatView;
