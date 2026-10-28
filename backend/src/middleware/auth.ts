@@ -22,7 +22,7 @@ export const PUBLIC_AUTH_PATHS = ['/auth/register', '/auth/login', '/auth/logout
 const OAUTH_CALLBACK_PATH = /^\/plugins\/[^/]+\/callback$/;
 // Slack calls these with no Juttler session. Events are signed; the install
 // callback is protected by the single-use OAuth state.
-const SLACK_PUBLIC_PATH = /^\/slack\/(?:events|team-bots\/callback)$/;
+const SLACK_PUBLIC_PATH = /^\/slack\/(?:events|user-events|team-bots\/callback)$/;
 
 export function isPublicAuthPath(path: string): boolean {
   return PUBLIC_AUTH_PATHS.includes(path) || OAUTH_CALLBACK_PATH.test(path) || SLACK_PUBLIC_PATH.test(path);

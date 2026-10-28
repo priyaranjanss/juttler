@@ -309,6 +309,22 @@ CREATE TABLE IF NOT EXISTS slack_threads (
 CREATE UNIQUE INDEX IF NOT EXISTS slack_threads_lookup
   ON slack_threads (installation_id, channel_id, thread_key);
 
+-- Slack messages handled as an OAuth-authorized user, without a per-bot Slack app.
+CREATE TABLE IF NOT EXISTS slack_user_threads (
+  id              TEXT PRIMARY KEY,
+  installation_id TEXT NOT NULL REFERENCES plugin_installations(id) ON DELETE CASCADE,
+  slack_team_id   TEXT NOT NULL,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  channel_id      TEXT NOT NULL,
+  thread_key      TEXT NOT NULL,
+  channel_type    TEXT NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT slack_user_threads_lookup UNIQUE (installation_id, channel_id, thread_key)
+);
+CREATE INDEX IF NOT EXISTS idx_slack_user_threads_channel
+  ON slack_user_threads (slack_team_id, channel_id, thread_key);
+
 -- Slack retries events and also emits both app_mention and message for one post.
 CREATE TABLE IF NOT EXISTS slack_event_receipts (
   event_id    TEXT PRIMARY KEY,

@@ -13,11 +13,16 @@ describe('normalizeJql', () => {
     assert.equal(normalizeJql('ticket 12', 'ABC'), 'key = ABC-12');
   });
 
-  it('scopes empty search to preferred project', () => {
+  it('searches the whole preferred project when no filter is supplied', () => {
     assert.equal(
       normalizeJql('', 'ICS'),
-      'project = ICS AND updated >= -120d ORDER BY updated DESC'
+      'project = ICS ORDER BY updated DESC'
     );
+    assert.equal(normalizeJql('', null), 'ORDER BY updated DESC');
+  });
+
+  it('does not silently add a recent-date limit to an order-only query', () => {
+    assert.equal(normalizeJql('ORDER BY updated DESC', 'ICS'), 'project = ICS ORDER BY updated DESC');
   });
 
   it('keeps real JQL', () => {

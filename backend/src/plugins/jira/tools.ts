@@ -3,12 +3,12 @@
  * Prefer get_ticket when a key is known; search when exploring.
  */
 
-import { optionalNumber, requiredString, requestJson, ToolExecutor } from '../shared';
+import { optionalNumber, requiredString, ToolExecutor } from '../shared';
 import {
   adfToText,
-  jiraAccount,
   jiraBase,
-  jiraHeaders,
+  jiraIssueUrl,
+  jiraRequest,
   plainTextDoc,
   preferredProject,
   searchIssues,
@@ -29,8 +29,7 @@ function projectForCreate(args: Record<string, any>): string {
 export const jiraTools: Record<string, ToolExecutor> = {
   list_projects: async (_args, ctx) => {
     const base = jiraBase(ctx);
-    const headers = jiraHeaders(ctx);
-    const data = await requestJson(`${base}/rest/api/3/project/search?maxResults=50`, { headers });
+    const data = await jiraRequest(ctx, `${base}/rest/api/3/project/search?maxResults=50`);
     const projects = (data.values ?? []).map((project: any) => ({
       key: project.key,
       name: project.name,
@@ -38,7 +37,6 @@ export const jiraTools: Record<string, ToolExecutor> = {
     }));
     return {
       total: typeof data.total === 'number' ? data.total : projects.length,
-      account: await jiraAccount(base, headers),
       projects,
     };
   },
@@ -48,14 +46,12 @@ export const jiraTools: Record<string, ToolExecutor> = {
     const jql = normalizeJql(args.jql, project);
     const limit = optionalNumber(args, 'max_results', 20, 100);
     const base = jiraBase(ctx);
-    const headers = jiraHeaders(ctx);
-    const found = await searchIssues(base, headers, jql, limit);
+    const found = await searchIssues(ctx, jql, limit);
 
     let total: number | undefined;
     try {
-      const counted = await requestJson(`${base}/rest/api/3/search/approximate-count`, {
+      const counted = await jiraRequest(ctx, `${base}/rest/api/3/search/approximate-count`, {
         method: 'POST',
-        headers,
         body: { jql },
       });
       if (typeof counted?.count === 'number') total = counted.count;
@@ -63,27 +59,33 @@ export const jiraTools: Record<string, ToolExecutor> = {
       // optional
     }
 
-    const issues = (found.issues ?? []).map((issue: any) => ({
-      key: issue.key,
-      summary: issue.fields?.summary,
-      status: issue.fields?.status?.name,
-      assignee: issue.fields?.assignee?.displayName ?? null,
-      priority: issue.fields?.priority?.name,
-      project: issue.fields?.project?.key,
-      url: `${base}/browse/${issue.key}`,
-    }));
+    const issues = found.issues.map((issue: any) => {
+      const key = issue.key || issue.fields?.key;
+      if (typeof key !== 'string' || !key) {
+        throw new Error('Jira returned an issue without its key; refusing to guess issue identifiers.');
+      }
+      const fields = issue.fields ?? {};
+      return {
+        key,
+        summary: fields.summary ?? issue.summary ?? '(no summary)',
+        status: fields.status?.name ?? issue.status?.name ?? issue.status ?? 'Unknown',
+        assignee: fields.assignee?.displayName ?? issue.assignee?.displayName ?? null,
+        priority: fields.priority?.name ?? issue.priority?.name ?? null,
+        project: fields.project?.key ?? issue.project?.key ?? key.split('-')[0],
+        url: jiraIssueUrl(ctx, key),
+      };
+    });
 
     return {
       total: total ?? (typeof found.total === 'number' ? found.total : issues.length),
       returned: issues.length,
       jql,
-      account: await jiraAccount(base, headers),
       issues,
       next:
         issues.length === 1
           ? `Call get_ticket with issue_key=${issues[0].key} to read the full description.`
           : issues.length > 1
-            ? 'Call get_ticket with the issue_key you want to work on.'
+            ? 'These are the matching issues. Do not guess issue keys; call get_ticket only for an exact key returned here or supplied by the user.'
             : 'No issues matched. Broaden jql or list_projects.',
     };
   },
@@ -91,9 +93,9 @@ export const jiraTools: Record<string, ToolExecutor> = {
   get_ticket: async (args, ctx) => {
     const key = pickIssueKeyArg(args, preferredProject(args));
     const base = jiraBase(ctx);
-    const data = await requestJson(
+    const data = await jiraRequest(
+      ctx,
       `${base}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,status,assignee,priority,description,comment,issuetype,project`,
-      { headers: jiraHeaders(ctx) }
     );
     const comments = (data.fields?.comment?.comments ?? []).slice(-8).map((comment: any) => ({
       author: comment.author?.displayName,
@@ -110,7 +112,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
       priority: data.fields?.priority?.name,
       description: adfToText(data.fields?.description).trim(),
       comments,
-      url: `${base}/browse/${data.key}`,
+      url: jiraIssueUrl(ctx, data.key),
       next: 'Implement the described work with GitHub tools (search_code → get_file → edit_file → create_pull_request), then optionally add_comment with the PR link.',
     };
   },
@@ -118,9 +120,8 @@ export const jiraTools: Record<string, ToolExecutor> = {
   create_ticket: async (args, ctx) => {
     const base = jiraBase(ctx);
     const project = projectForCreate(args);
-    const data = await requestJson(`${base}/rest/api/3/issue`, {
+    const data = await jiraRequest(ctx, `${base}/rest/api/3/issue`, {
       method: 'POST',
-      headers: jiraHeaders(ctx),
       body: {
         fields: {
           project: { key: project },
@@ -130,7 +131,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
         },
       },
     });
-    return { created: true, key: data.key, url: `${base}/browse/${data.key}` };
+    return { created: true, key: data.key, url: jiraIssueUrl(ctx, data.key) };
   },
 
   update_ticket: async (args, ctx) => {
@@ -141,9 +142,8 @@ export const jiraTools: Record<string, ToolExecutor> = {
     if (Object.keys(fields).length === 0) {
       throw new Error('Nothing to update — provide summary or description.');
     }
-    await requestJson(`${jiraBase(ctx)}/rest/api/3/issue/${encodeURIComponent(key)}`, {
+    await jiraRequest(ctx, `${jiraBase(ctx)}/rest/api/3/issue/${encodeURIComponent(key)}`, {
       method: 'PUT',
-      headers: jiraHeaders(ctx),
       body: { fields },
     });
     return { updated: true, key };
@@ -152,9 +152,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
   list_transitions: async (args, ctx) => {
     const key = pickIssueKeyArg(args, preferredProject(args));
     const base = jiraBase(ctx);
-    const data = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
-      headers: jiraHeaders(ctx),
-    });
+    const data = await jiraRequest(ctx, `${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`);
     const transitions = (data.transitions ?? []).map((t: any) => ({
       id: t.id,
       name: t.name,
@@ -167,10 +165,7 @@ export const jiraTools: Record<string, ToolExecutor> = {
     const key = pickIssueKeyArg(args, preferredProject(args));
     const wanted = requiredString(args, 'transition').trim().toLowerCase();
     const base = jiraBase(ctx);
-    const headers = jiraHeaders(ctx);
-    const transitions = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
-      headers,
-    });
+    const transitions = await jiraRequest(ctx, `${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`);
     const list = transitions.transitions ?? [];
     const match =
       list.find((t: any) => String(t.name || '').toLowerCase() === wanted) ||
@@ -188,9 +183,8 @@ export const jiraTools: Record<string, ToolExecutor> = {
         `Transition "${args.transition}" is not available on ${key}. Available: ${available || 'none'}. Call list_transitions first.`
       );
     }
-    await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
+    await jiraRequest(ctx, `${base}/rest/api/3/issue/${encodeURIComponent(key)}/transitions`, {
       method: 'POST',
-      headers,
       body: { transition: { id: match.id } },
     });
     return {
@@ -204,22 +198,18 @@ export const jiraTools: Record<string, ToolExecutor> = {
   add_comment: async (args, ctx) => {
     const key = pickIssueKeyArg(args, preferredProject(args));
     const base = jiraBase(ctx);
-    const data = await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
+    const data = await jiraRequest(ctx, `${base}/rest/api/3/issue/${encodeURIComponent(key)}/comment`, {
       method: 'POST',
-      headers: jiraHeaders(ctx),
       body: { body: plainTextDoc(requiredString(args, 'comment')) },
     });
-    return { commented: true, key, comment_id: data.id, url: `${base}/browse/${key}` };
+    return { commented: true, key, comment_id: data.id, url: jiraIssueUrl(ctx, key) };
   },
 
   assign_ticket: async (args, ctx) => {
     const key = pickIssueKeyArg(args, preferredProject(args));
     const who = requiredString(args, 'assignee');
     const base = jiraBase(ctx);
-    const headers = jiraHeaders(ctx);
-    const users = await requestJson(`${base}/rest/api/3/user/search?query=${encodeURIComponent(who)}`, {
-      headers,
-    });
+    const users = await jiraRequest(ctx, `${base}/rest/api/3/user/search?query=${encodeURIComponent(who)}`);
     const list = Array.isArray(users) ? users : [];
     const needle = who.toLowerCase();
     const exact = list.find(
@@ -233,9 +223,8 @@ export const jiraTools: Record<string, ToolExecutor> = {
       const names = list.map((user: any) => user.displayName).filter(Boolean).join(', ');
       throw new Error(`No single Jira user matched "${who}". Matches: ${names || 'none'}.`);
     }
-    await requestJson(`${base}/rest/api/3/issue/${encodeURIComponent(key)}/assignee`, {
+    await jiraRequest(ctx, `${base}/rest/api/3/issue/${encodeURIComponent(key)}/assignee`, {
       method: 'PUT',
-      headers,
       body: { accountId: chosen.accountId },
     });
     return { assigned: true, key, assignee: chosen.displayName || who };

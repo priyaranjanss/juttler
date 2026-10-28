@@ -47,7 +47,7 @@ const AVATAR_COLORS = [
 ];
 
 export const UserShell: React.FC = () => {
-  const { bots, theme, showToast } = useApp();
+  const { bots, theme, showToast, refreshData } = useApp();
   const isDark = theme === 'dark';
 
   // Create Bot modal
@@ -71,7 +71,9 @@ export const UserShell: React.FC = () => {
     const link = params.get('linkSlack');
     const install = params.get('slackInstall');
     const slackBot = params.get('slackBot');
-    if (!link && !install) return;
+    const connect = params.get('connect');
+    const plugin = params.get('plugin');
+    if (!link && !install && !connect) return;
 
     const linkToken = params.get('token');
     const reason = params.get('slackReason');
@@ -96,7 +98,15 @@ export const UserShell: React.FC = () => {
     if (install === 'awaiting_admin_approval') showToast('Awaiting admin approval in Slack', 'info');
     if (install === 'pending_install') showToast('Slack install was not finished. Send the request from the bot settings.', 'warning');
     if (install === 'error') showToast(reason || 'Slack install failed', 'warning');
-  }, [showToast]);
+    if (connect && plugin === 'slack') {
+      if (connect === 'success') {
+        showToast('Slack account connected', 'success');
+        void refreshData();
+      } else {
+        showToast('Slack connection failed. Check the Slack OAuth settings.', 'warning');
+      }
+    }
+  }, [refreshData, showToast]);
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {

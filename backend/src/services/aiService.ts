@@ -346,6 +346,56 @@ function userFacingOutcome(events: ToolEvent[]): string {
   return 'I could not finish that yet. Say continue and I will try again.';
 }
 
+function contentLooksLikeToolCallDump(text: string): boolean {
+  let cursor = 0;
+  let calls = 0;
+
+  while (cursor < text.length) {
+    while (/\s/.test(text[cursor] ?? '')) cursor++;
+    if (text[cursor] !== '{') return false;
+
+    const start = cursor;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (; cursor < text.length; cursor++) {
+      const character = text[cursor];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === '{') depth++;
+      else if (character === '}' && --depth === 0) {
+        cursor++;
+        break;
+      }
+    }
+
+    if (depth !== 0) return false;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text.slice(start, cursor));
+    } catch {
+      return false;
+    }
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      !('name' in parsed) ||
+      typeof parsed.name !== 'string' ||
+      !('arguments' in parsed)
+    ) {
+      return false;
+    }
+    calls++;
+  }
+
+  return calls > 0;
+}
+
 /** Same tool + same error three times → stop looping and report the blockage. */
 function isStuckOnSameFailure(events: ToolEvent[]): boolean {
   const fails = events.filter((e) => e.status === 'failed' || e.status === 'unavailable');
@@ -362,7 +412,12 @@ function ensureTurnReply(
   error?: TurnResult['error']
 ): TurnResult {
   const trimmed = text?.trim();
-  if (trimmed && !/^here is what i got so far:/i.test(trimmed) && !/^progress:/i.test(trimmed)) {
+  if (
+    trimmed &&
+    !contentLooksLikeToolCallDump(trimmed) &&
+    !/^here is what i got so far:/i.test(trimmed) &&
+    !/^progress:/i.test(trimmed)
+  ) {
     return { text: trimmed, tools: events, waitingForApproval: false, error };
   }
   if (events.length > 0) {
@@ -382,12 +437,15 @@ function buildToolCapabilityContext(tools: BotToolSpec[]): string {
   const availableTools = tools
     .map((tool) => `- ${tool.name}: ${tool.description}`)
     .join('\n');
+  const jiraGuidance = tools.some((tool) => tool.name.startsWith('jira.'))
+    ? '\nFor Jira: when asked to count or list tickets, call jira.search_tickets and answer from its returned total and issues. Never invent or guess issue keys. Call jira.get_ticket only for an exact key supplied by the user or returned by search.'
+    : '';
 
   return `\n\nAuthoritative tool access for this bot in this turn:
 ${
   availableTools || '- No external tools are currently enabled and connected for this bot.'
 }
-The list above is every tool this bot can use on this turn, for any request. Call whichever tools the request needs, in whatever order, and answer from their results. Do not say a plugin is disconnected when its tools are listed. If a tool returns an error, report that error.`;
+The list above is every tool this bot can use on this turn, for any request. Call whichever tools the request needs, in whatever order, and answer from their results. Do not say a plugin is disconnected when its tools are listed. If a tool returns an error, report that error.${jiraGuidance}`;
 }
 
 function buildSystemPrompt(bot: Bot, userName: string, tools: BotToolSpec[]): string {
@@ -467,19 +525,12 @@ function buildInitialMessages(
 }
 
 function toolChoiceFor(
-  round: number,
   tools: BotToolSpec[],
-  message: string,
   forceTools = false
 ): 'auto' | 'required' {
   if (tools.length === 0) return 'auto';
   if (forceTools) return 'required';
-  if (round > 0) return 'auto';
-  const text = message.trim().toLowerCase();
-  if (/^(hi|hey|hello|thanks|thank you|ok|okay|yo|sup|good morning|good night)[!.?\s]*$/.test(text)) {
-    return 'auto';
-  }
-  return 'required';
+  return 'auto';
 }
 
 function turnHasAction(events: ToolEvent[]): boolean {
@@ -716,12 +767,14 @@ function toFreeEndpointMessages(
 
     if (message.role === 'assistant' && message.tool_calls?.length) {
       for (const call of message.tool_calls) toolNames.set(call.id, call.function.name);
-      const requestedTools = message.tool_calls
-        .map((call) => `${call.function.name}(${call.function.arguments})`)
-        .join('\n');
       return {
         role: 'assistant',
-        content: [message.content, `Requested tools:\n${requestedTools}`].filter(Boolean).join('\n'),
+        content: [
+          message.content,
+          `Tools called internally: ${message.tool_calls.map((call) => call.function.name).join(', ')}`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
       };
     }
 
@@ -945,7 +998,7 @@ export async function runBotTurn(params: {
       const res = usesFreeEndpoint
         ? await fetchCompletion(wiring, messages, {
             tools,
-            toolChoice: toolChoiceFor(round, tools, params.messageContent, forceToolsNext),
+            toolChoice: toolChoiceFor(tools, forceToolsNext),
             reasoningEffort,
             maxTokens: tools.length > 0 ? 8192 : 2048,
             temperature: tools.length > 0 ? 0.2 : 0.7,
@@ -962,7 +1015,7 @@ export async function runBotTurn(params: {
           ...(tools.length > 0
             ? {
                 tools: toOpenAiTools(tools),
-                tool_choice: toolChoiceFor(round, tools, params.messageContent, forceToolsNext),
+                tool_choice: toolChoiceFor(tools, forceToolsNext),
               }
             : {}),
           // Grok-style reasoning: think = medium, big_brain = high, off = none.

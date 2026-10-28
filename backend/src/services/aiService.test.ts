@@ -131,5 +131,82 @@ describe('free model endpoint', () => {
     assert.match(messages[0].content, /does not support structured function calls/);
     assert.deepEqual(result.tools[0].result, { value: 'from endpoint' });
     assert.equal(result.text, 'Tool finished.');
+
+    const calledToolMessage = (requestBodies[1].messages as Array<{ role: string; content: string }>).find(
+      (message) => message.role === 'assistant'
+    );
+    assert.match(calledToolMessage?.content ?? '', /Tools called internally: demo\.echo/);
+    assert.doesNotMatch(calledToolMessage?.content ?? '', /"arguments"/);
+  });
+
+  it('does not expose raw concatenated tool-call JSON as a reply', async () => {
+    const bot = freeEndpointBot();
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          content:
+            '{"name":"get_team_roster","arguments":{}}{"name":"github.list_prs","arguments":{"repo":"owner/project"}}',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+
+    const result = await runBotTurn({
+      bot,
+      userName: 'Test user',
+      history: [],
+      messageContent: 'Do you have GitHub access?',
+      tools: [
+        {
+          name: 'github.list_prs',
+          description: 'List pull requests.',
+          parameters: { type: 'object', properties: {} },
+        },
+      ],
+      executor: async () => ({ kind: 'result', ok: true, result: {} }),
+    });
+
+    assert.equal(result.text, undefined);
+    assert.doesNotMatch(JSON.stringify(result), /get_team_roster|github\.list_prs/);
+    assert.equal(result.error?.kind, 'bad_response');
+  });
+});
+
+describe('tool selection', () => {
+  it('allows a direct answer to a capability question without forcing tool calls', async () => {
+    const bot: Bot = {
+      ...freeEndpointBot(),
+      aiProvider: 'kilo_gateway',
+      aiEndpoint: AI_PROVIDERS.kilo_gateway.endpoint,
+      aiModel: 'test-model',
+      aiApiKey: 'test-key',
+    };
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'Yes, GitHub is connected.' } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    const result = await runBotTurn({
+      bot,
+      userName: 'Test user',
+      history: [],
+      messageContent: 'Do you have GitHub access?',
+      tools: [
+        {
+          name: 'github.list_prs',
+          description: 'List pull requests.',
+          parameters: { type: 'object', properties: {} },
+        },
+      ],
+      executor: async () => ({ kind: 'result', ok: true, result: {} }),
+    });
+
+    assert.equal(requestBody?.tool_choice, 'auto');
+    assert.equal(result.text, 'Yes, GitHub is connected.');
   });
 });

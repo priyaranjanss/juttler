@@ -30,12 +30,15 @@ export async function slackApi(
     ok?: boolean;
     error?: string;
     errors?: Array<{ message?: string; pointer?: string }>;
+    response_metadata?: { messages?: string[] };
   };
   if (!response.ok || data.ok === false) {
-    const details = (data.errors ?? [])
-      .map((entry) => entry.message || entry.pointer)
-      .filter(Boolean)
-      .join('; ');
+    const details = [
+      ...(data.errors ?? [])
+        .map((entry) => entry.message || entry.pointer)
+        .filter(Boolean),
+      ...(data.response_metadata?.messages ?? []),
+    ].join('; ');
     throw new SlackApiError(method, data.error || `http_${response.status}`, details);
   }
   return data;

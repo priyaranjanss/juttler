@@ -2,24 +2,114 @@
  * Shared Jira Cloud REST helpers.
  */
 
-import { requestJson } from '../shared';
+import { isAuthFailure, requestJson, ToolContext } from '../shared';
 
-export function jiraBase(ctx: { credential: Record<string, any> }): string {
+type JiraContext = Pick<ToolContext, 'credential' | 'metadata' | 'refreshAccessToken'>;
+
+export function jiraBase(ctx: JiraContext): string {
+  const cloudId = ctx.metadata.cloudId;
+  if (cloudId) {
+    return `https://api.atlassian.com/ex/jira/${encodeURIComponent(String(cloudId))}`;
+  }
+
   const site = ctx.credential.site;
   if (!site) {
-    throw new Error('Jira needs a site. Reconnect Jira from Plugins and include your site, e.g. "mycompany".');
+    throw new Error('Jira needs an authorised site. Connect Jira from Plugins and grant access to a Jira site.');
   }
   let host = String(site).trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
   if (!host.includes('.')) host = `${host}.atlassian.net`;
   return `https://${host}`;
 }
 
-export function jiraHeaders(ctx: { credential: Record<string, any> }): Record<string, string> {
-  if (!ctx.credential.email || !ctx.credential.apiToken) {
-    throw new Error('Jira needs an email and an API token. Reconnect Jira from Plugins.');
+export function jiraIssueUrl(ctx: JiraContext, issueKey: string): string {
+  const siteUrl = ctx.metadata.siteUrl;
+  const base = typeof siteUrl === 'string' && siteUrl
+    ? siteUrl.replace(/\/+$/, '')
+    : ctx.credential.site
+      ? jiraBase(ctx)
+      : '';
+  return base ? `${base}/browse/${encodeURIComponent(issueKey)}` : '';
+}
+
+export function jiraHeaders(ctx: JiraContext): Record<string, string> {
+  if (ctx.credential.token) {
+    return {
+      Authorization: `Bearer ${String(ctx.credential.token)}`,
+      Accept: 'application/json',
+    };
   }
-  const basic = Buffer.from(`${ctx.credential.email}:${ctx.credential.apiToken}`).toString('base64');
-  return { Authorization: `Basic ${basic}`, Accept: 'application/json' };
+
+  if (ctx.credential.email && ctx.credential.apiToken) {
+    const basic = Buffer.from(`${ctx.credential.email}:${ctx.credential.apiToken}`).toString('base64');
+    return { Authorization: `Basic ${basic}`, Accept: 'application/json' };
+  }
+
+  throw new Error('Jira needs an OAuth connection. Connect Jira from Plugins.');
+}
+
+interface JiraRequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+}
+
+export async function jiraRequest(
+  ctx: JiraContext,
+  url: string,
+  options: JiraRequestOptions = {}
+): Promise<any> {
+  const headers = () => ({ ...options.headers, ...jiraHeaders(ctx) });
+
+  try {
+    return await requestJson(url, { ...options, headers: headers() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const issueKey = url.match(/\/issue\/([^/?]+)/i)?.[1];
+    if (issueKey && /\(404\)/.test(message)) {
+      throw new Error(
+        `Jira issue ${decodeURIComponent(issueKey)} was not found or is not visible to the connected account. Use an exact key returned by Jira search; do not guess issue keys.`
+      );
+    }
+    if (
+      !ctx.credential.refreshToken ||
+      !ctx.credential.token ||
+      !isAuthFailure(message)
+    ) {
+      throw error;
+    }
+
+    const clientId = process.env.JIRA_CLIENT_ID;
+    const clientSecret = process.env.JIRA_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+      throw new Error('Jira access expired and token refresh is not configured. Reconnect Jira.');
+    }
+
+    const response = await fetch('https://auth.atlassian.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: ctx.credential.refreshToken,
+      }),
+    });
+    const token = (await response.json().catch(() => ({}))) as {
+      access_token?: string;
+      refresh_token?: string;
+      error_description?: string;
+      error?: string;
+    };
+    if (!response.ok || !token.access_token) {
+      const reason = token.error_description || token.error || `HTTP ${response.status}`;
+      throw new Error(`Could not refresh the Jira OAuth token: ${reason}. Reconnect Jira.`);
+    }
+
+    ctx.credential.token = token.access_token;
+    if (token.refresh_token) ctx.credential.refreshToken = token.refresh_token;
+    await ctx.refreshAccessToken?.(token.access_token, token.refresh_token);
+    return requestJson(url, { ...options, headers: headers() });
+  }
 }
 
 /** Flatten Atlassian Document Format to plain text. */
@@ -51,25 +141,16 @@ export function plainTextDoc(text: string) {
   return { type: 'doc', version: 1, content };
 }
 
-export async function jiraAccount(
-  base: string,
-  headers: Record<string, string>
-): Promise<{ name: string; email: string }> {
-  const me = await requestJson(`${base}/rest/api/3/myself`, { headers });
-  return { name: me.displayName || me.name || '', email: me.emailAddress || '' };
-}
-
 const SEARCH_FIELDS = ['summary', 'status', 'assignee', 'priority', 'issuetype', 'project', 'updated'];
 
-/** Try enhanced search, then classic — tenants disagree on payloads. */
+/** Search enhanced JQL first, then the classic endpoint for older Jira sites. */
 export async function searchIssues(
-  base: string,
-  headers: Record<string, string>,
+  ctx: JiraContext,
   jql: string,
   limit: number
 ): Promise<any> {
+  const base = jiraBase(ctx);
   const attempts: Array<{ url: string; body: Record<string, unknown> }> = [
-    { url: `${base}/rest/api/3/search/jql`, body: { jql, maxResults: limit } },
     { url: `${base}/rest/api/3/search/jql`, body: { jql, maxResults: limit, fields: SEARCH_FIELDS } },
     {
       url: `${base}/rest/api/3/search`,
@@ -80,11 +161,21 @@ export async function searchIssues(
   let lastError: Error | null = null;
   for (const attempt of attempts) {
     try {
-      return await requestJson(attempt.url, { method: 'POST', headers, body: attempt.body });
+      const result = await jiraRequest(ctx, attempt.url, { method: 'POST', body: attempt.body });
+      if (!Array.isArray(result?.issues)) {
+        throw new Error('Jira issue search returned an unexpected response (missing issues array).');
+      }
+      if (result.issues.length === 0 && Number(result.total) > 0) {
+        throw new Error('Jira issue search returned a count but no issue records.');
+      }
+      return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       lastError = err instanceof Error ? err : new Error(message);
-      if (!/\(400\)|\(404\)|\(410\)/.test(message)) throw lastError;
+      const canTryFallback =
+        /\(400\)|\(404\)|\(410\)/.test(message) ||
+        /unexpected response|count but no issue records/i.test(message);
+      if (!canTryFallback) throw lastError;
     }
   }
   throw lastError ?? new Error('Jira search failed.');

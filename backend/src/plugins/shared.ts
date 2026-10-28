@@ -15,7 +15,7 @@ export interface ToolContext {
    * caller can persist it. Gmail access tokens last only an hour, so without this
    * every call fails an hour after connecting.
    */
-  refreshAccessToken?: (token: string) => void | Promise<void>;
+  refreshAccessToken?: (token: string, refreshToken?: string) => void | Promise<void>;
 }
 
 export interface ToolOutcome {
@@ -204,12 +204,12 @@ export function optionalNumber(args: Record<string, any>, key: string, fallback:
  * Recognises "the provider rejected our credential" rather than "the request was
  * wrong", so the gateway can move the installation to needs_reauth.
  *
- * Covers generic OAuth wording plus the provider-specific codes: Google's
- * invalid_auth/token_revoked and Slack's not_authed/account_inactive/missing_scope.
+ * Covers generic OAuth wording plus provider-specific invalid-grant and token
+ * revocation errors.
  */
 export function isAuthFailure(message: string): boolean {
   if (/\(40[13]\)/.test(message)) return true;
-  return /invalid[_ ]?(credentials|auth|token)|\bunauthorized\b|\bbad credentials\b|authentication token is invalid|token_revoked|account_inactive|not_authed|missing_scope/i.test(
+  return /invalid[_ ]?(credentials|auth|token|grant)|\bunauthorized\b|\bbad credentials\b|authentication token is invalid|refresh token.*(?:invalid|expired|revoked)|token_revoked|account_inactive|not_authed|missing_scope/i.test(
     message
   );
 }

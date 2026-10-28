@@ -1,11 +1,55 @@
-﻿node_modules/
+﻿# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
 build/
 dist/
-coverage/
-.DS_Store
-*.log
-.env*
+out/
+*.tsbuildinfo
+
+# Environment files (keep examples)
+.env
+.env.local
+.env.*.local
 !.env.example
-.neon
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+
+# Testing / coverage
+coverage/
+.nyc_output/
+
+# Local tooling / agent state (do not commit)
+.agents/
+.claude/
+.freebuff/
+.neon/
+
+# Misc
+*.tgz
+.cache/
+tmp/
+temp/
 
 
+.vscode
+.claude
+.agents

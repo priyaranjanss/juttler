@@ -3,7 +3,16 @@
  * as raw ** or ``` fences the user never asked to see.
  */
 
-export function toSlackMrkdwn(text: string, mentionUserId?: string): string {
+export interface SlackMentionTarget {
+  userId: string;
+  names: string[];
+}
+
+export function toSlackMrkdwn(
+  text: string,
+  mentionUserId?: string,
+  mentionTargets: SlackMentionTarget[] = []
+): string {
   let out = text.replace(/\r\n/g, '\n');
 
   // Fenced code blocks → Slack triple backticks (language tag dropped).
@@ -26,6 +35,23 @@ export function toSlackMrkdwn(text: string, mentionUserId?: string): string {
   );
   out = out.replace(/<invoke\s+name=["'][^"']+["']\s*>[\s\S]*?<\/invoke>/gi, '');
   out = out.replace(/\n{3,}/g, '\n\n');
+
+  for (const target of mentionTargets) {
+    if (!/^[UW][A-Z0-9]+$/.test(target.userId)) continue;
+    const slackMention = `<@${target.userId}>`;
+    const marker = `\u0000slack-user-${target.userId}\u0000`;
+    out = out.replaceAll(slackMention, marker);
+    for (const name of target.names) {
+      const normalizedName = name.trim();
+      if (!normalizedName) continue;
+      const escapedName = normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(
+        new RegExp(`(^|[^\\w<])@${escapedName}(?=$|[^\\w])`, 'gi'),
+        (_match, prefix: string) => `${prefix}${slackMention}`
+      );
+    }
+    out = out.replaceAll(marker, slackMention);
+  }
 
   if (mentionUserId && /^[UW][A-Z0-9]+$/.test(mentionUserId)) {
     const slackMention = `<@${mentionUserId}>`;

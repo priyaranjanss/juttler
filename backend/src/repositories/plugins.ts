@@ -202,6 +202,40 @@ export async function findInstallationByUserAndPlugin(
   return rows.length > 0 ? rows[0] : null;
 }
 
+export interface SlackUserInstallation {
+  id: string;
+  userId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  metadata: Record<string, any>;
+}
+
+/** Finds the Juttler OAuth installation that owns a Slack user identity. */
+export async function findSlackUserInstallation(
+  slackTeamId: string,
+  slackUserId: string
+): Promise<SlackUserInstallation | null> {
+  const rows = (await sql`
+    select i.id, i.user_id, i.metadata
+    from plugin_installations i
+    join plugins p on p.id = i.plugin_id
+    where p.slug = 'slack'
+      and i.status = 'connected'
+      and i.metadata ->> 'team_id' = ${slackTeamId}
+      and i.metadata ->> 'authed_user_id' = ${slackUserId}
+    limit 2
+  `) as unknown as Array<{ id: string; user_id: string; metadata: Record<string, any> | null }>;
+
+  if (rows.length !== 1) return null;
+  return {
+    id: rows[0].id,
+    userId: rows[0].user_id,
+    slackTeamId,
+    slackUserId,
+    metadata: rows[0].metadata ?? {},
+  };
+}
+
 export async function createInstallation(data: {
   userId: string;
   pluginId: string;
@@ -366,16 +400,21 @@ export async function getPluginUsageStats(): Promise<
 export async function updateInstallationAccessToken(
   id: string,
   accessToken: string,
-  currentCredential?: Record<string, any>
+  currentCredential?: Record<string, any>,
+  refreshToken?: string
 ): Promise<void> {
   const merged: Record<string, any> = {
     ...(currentCredential ?? {}),
     token: accessToken,
+    ...(refreshToken ? { refreshToken } : {}),
   };
+  const encrypted = encryptToken(JSON.stringify(merged));
+  const encryptedRefreshToken = refreshToken ? encryptToken(refreshToken) : null;
 
   await sql`
     update plugin_installations
-    set access_token = ${encryptToken(JSON.stringify(merged))},
+    set access_token = ${encrypted},
+        refresh_token = coalesce(${encryptedRefreshToken}, refresh_token),
         updated_at = now()
     where id = ${id}
   `;

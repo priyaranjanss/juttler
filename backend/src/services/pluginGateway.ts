@@ -156,7 +156,8 @@ export async function executeApprovedTool(req: GatewayRequest): Promise<GatewayO
     metadata,
     // A tool that refreshed its access token hands the new one back so it is
     // persisted; the refresh token is preserved.
-    refreshAccessToken: (token) => updateInstallationAccessToken(installation.id, token, credential),
+    refreshAccessToken: (token, refreshToken) =>
+      updateInstallationAccessToken(installation.id, token, credential, refreshToken),
   });
 
   // A rejected credential means the user must re-authorise: flag it so the UI

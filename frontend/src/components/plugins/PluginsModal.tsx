@@ -621,8 +621,15 @@ const PluginDetail: React.FC<PluginDetailProps> = ({ plugin, installation, botLi
               </p>
             ) : (
               <p className={`text-[11px] leading-relaxed ${isDark ? 'text-[#71767b]' : 'text-[#536471]'}`}>
-                {plugin.name} connects with your {plugin.slug === 'github' ? 'GitHub' : 'Google'} account.
-                You'll approve access there, and the credential is stored encrypted — it is never shown again.
+                {plugin.name} connects with your{' '}
+                {plugin.slug === 'github' ? 'GitHub' : plugin.slug === 'jira' ? 'Atlassian' : 'Google'} account.
+                {' '}You'll approve access there, and the credential is stored encrypted — it is never shown again.
+              </p>
+            )}
+
+            {plugin.slug === 'jira' && installation?.metadata?.siteName && (
+              <p className={`text-[11px] ${isDark ? 'text-[#8b98a5]' : 'text-[#536471]'}`}>
+                Connected Jira site: {installation.metadata.siteName}
               </p>
             )}
 

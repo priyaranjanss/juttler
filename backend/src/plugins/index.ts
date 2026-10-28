@@ -100,7 +100,7 @@ export function getPluginOauth(slug: string): PluginOAuthSpec | undefined {
 export interface ToolRunContext {
   credential: Record<string, any>;
   metadata: Record<string, any>;
-  refreshAccessToken?: (token: string) => void | Promise<void>;
+  refreshAccessToken?: (token: string, refreshToken?: string) => void | Promise<void>;
 }
 
 /** Every tool in the system, ordered by plugin. */

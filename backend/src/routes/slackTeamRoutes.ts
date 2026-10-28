@@ -12,6 +12,7 @@ import {
   slackInstallView,
 } from '../services/slackTeam/install';
 import { acceptSlackEvent, slackChallenge } from '../services/slackTeam/inbound';
+import { acceptSlackUserEvent } from '../services/slackTeam/userInbound';
 import { verifySlackLink } from '../config/jwt';
 
 const router = Router();
@@ -35,6 +36,21 @@ router.post('/events', asyncHandler(async (req: Request, res: Response) => {
     req.header('x-slack-signature'),
     body
   );
+  res.status(result.status).json({ ok: result.status === 200 });
+}));
+
+router.post('/user-events', asyncHandler(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Record<string, any>;
+  const result = await acceptSlackUserEvent(
+    req.rawBody?.toString('utf8') ?? '',
+    req.header('x-slack-request-timestamp'),
+    req.header('x-slack-signature'),
+    body
+  );
+  if (result.challenge) {
+    res.json({ challenge: result.challenge });
+    return;
+  }
   res.status(result.status).json({ ok: result.status === 200 });
 }));
 

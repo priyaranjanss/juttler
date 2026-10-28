@@ -1,0 +1,19 @@
+{
+  "name": "Juttler (dev space)",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+        "ms-python.python",
+        "golang.go",
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}

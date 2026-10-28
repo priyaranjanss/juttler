@@ -1,1 +1,25 @@
+# Backend
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+!.env.example
+
+*.log
+logs/
+
 .neon
+
+coverage/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+tmp/
+temp/

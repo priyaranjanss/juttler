@@ -296,9 +296,20 @@ export async function buildAccountLinkUrl(userId: string, slackTeamId?: string):
 }
 
 /** Keeps the Slack app’s name and color aligned with the bot. Failures are non-blocking. */
+let missingSlackConfigTokenWarned = false;
+
 export async function syncSlackProfile(bot: Bot): Promise<void> {
   const app = await findSlackAppByBotId(bot.id);
   if (!app?.slackAppId) return;
+  if (!(process.env.SLACK_CONFIG_TOKEN || '').trim()) {
+    if (!missingSlackConfigTokenWarned) {
+      missingSlackConfigTokenWarned = true;
+      console.warn(
+        'Skipping Slack app profile sync: SLACK_CONFIG_TOKEN is not configured. Slack replies and shared-account connections are unaffected.'
+      );
+    }
+    return;
+  }
   await upsertSlackApp({
     appId: app.slackAppId,
     name: bot.name,

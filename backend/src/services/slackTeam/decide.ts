@@ -52,6 +52,11 @@ export function slackThreadKey(channelType: string, threadTs: string | undefined
   return threadTs || messageTs;
 }
 
+/** Slack's message event represents a user mention as <@USERID>. */
+export function slackMentionedUserIds(text: string): string[] {
+  return [...text.matchAll(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g)].map((match) => match[1]);
+}
+
 /** Turns Slack mention markup into text the model can read. */
 export function slackTextForModel(text: string, botUserId: string): string {
   return text

@@ -19,12 +19,8 @@ export const jiraPlugin: PluginModule = {
       'Do ticket work end-to-end: search, read, create, update, comment, assign, and change status.',
     category: 'Project management',
     isOfficial: true,
-    authType: 'token',
-    requiredCredentials: [
-      { key: 'site', label: 'Jira site', secret: false, placeholder: 'your-site (before .atlassian.net)' },
-      { key: 'email', label: 'Account email', secret: false, placeholder: 'you@company.com' },
-      { key: 'apiToken', label: 'API token', secret: true, placeholder: 'Atlassian API token' },
-    ],
+    authType: 'oauth',
+    requiredCredentials: [],
     tools: [
       {
         name: 'list_projects',
@@ -35,7 +31,7 @@ export const jiraPlugin: PluginModule = {
       {
         name: 'search_tickets',
         description:
-          'Search with JQL when you do not already know the issue key. If the user named a key, use get_ticket instead.',
+          'Search with JQL when you do not already know the issue key. Returns verified issue keys, summaries, statuses, and links. For "list/show/count tickets" requests, use this result directly and never guess issue keys. If the user supplied one exact key, use get_ticket instead.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -145,4 +141,54 @@ export const jiraPlugin: PluginModule = {
     ],
   },
   tools: jiraTools,
+  oauth: {
+    envPrefix: 'JIRA',
+    authorizeUrl: 'https://auth.atlassian.com/authorize',
+    tokenUrl: 'https://auth.atlassian.com/oauth/token',
+    scope: 'read:jira-work write:jira-work read:jira-user offline_access',
+    callbackSlug: 'jira',
+    extraAuthParams: {
+      audience: 'api.atlassian.com',
+      response_type: 'code',
+      prompt: 'consent',
+    },
+    requiresResponseType: true,
+    tokenBodyStyle: 'json',
+    extractToken: (token) => token.access_token,
+    toCredential: (token) => ({
+      token: token.access_token,
+      refreshToken: token.refresh_token,
+    }),
+    identity: () => ({}),
+    identityRequired: true,
+    fetchIdentity: async (accessToken) => {
+      const response = await fetch('https://api.atlassian.com/oauth/token/accessible-resources', {
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      });
+      if (!response.ok) {
+        throw new Error(`Could not list Jira sites (${response.status}).`);
+      }
+      const resources = (await response.json()) as Array<{
+        id?: string;
+        name?: string;
+        url?: string;
+      }>;
+      const site = resources.find((resource) => resource.id && resource.url);
+      if (!site) {
+        throw new Error('This Atlassian account has no Jira site accessible to Juttler.');
+      }
+      return {
+        cloudId: site.id,
+        siteName: site.name || site.url,
+        siteUrl: site.url,
+        accessibleSites: resources
+          .filter((resource) => resource.id && resource.url)
+          .map((resource) => ({
+            cloudId: resource.id,
+            name: resource.name || resource.url,
+            url: resource.url,
+          })),
+      };
+    },
+  },
 };

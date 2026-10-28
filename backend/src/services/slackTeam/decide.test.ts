@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { decideSlackReply, slackThreadKey } from './decide';
+import { decideSlackReply, slackMentionedUserIds, slackThreadKey } from './decide';
 
 const BOT = 'UBOT';
 
@@ -64,5 +64,14 @@ describe('slackThreadKey', () => {
   it('keys a channel thread by its root timestamp', () => {
     assert.equal(slackThreadKey('channel', '111.222', '333.444'), '111.222');
     assert.equal(slackThreadKey('channel', undefined, '333.444'), '333.444');
+  });
+});
+
+describe('slackMentionedUserIds', () => {
+  it('extracts Slack user mentions with or without display labels', () => {
+    assert.deepEqual(
+      slackMentionedUserIds('Hi <@U012ABC> and <@W045DEF|priya>'),
+      ['U012ABC', 'W045DEF']
+    );
   });
 });

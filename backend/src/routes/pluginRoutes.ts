@@ -335,7 +335,11 @@ router.get('/:slug/callback', asyncHandler(async (req: Request, res: Response) =
       metadata = config.fetchIdentity
         ? await config.fetchIdentity(accessToken)
         : config.identity(token) || {};
-    } catch {
+      if (config.identityRequired && Object.keys(metadata).length === 0) {
+        throw new Error('Could not resolve the authorised account.');
+      }
+    } catch (identityError) {
+      if (config.identityRequired) throw identityError;
       // Identity lookup is best-effort; the connection still works
     }
 
@@ -348,6 +352,19 @@ router.get('/:slug/callback', asyncHandler(async (req: Request, res: Response) =
       credential: config.toCredential(token),
       metadata,
     });
+
+    if (
+      slug === 'slack' &&
+      typeof metadata.authed_user_id === 'string' &&
+      typeof metadata.team_id === 'string'
+    ) {
+      await linkSlackAccount(
+        bound.userId,
+        metadata.authed_user_id,
+        metadata.team_id,
+        typeof metadata.authed_user_name === 'string' ? metadata.authed_user_name : null
+      );
+    }
 
     return res.redirect(`${frontend}/workspace/chat?connect=success&plugin=${slug}`);
   } catch (err) {

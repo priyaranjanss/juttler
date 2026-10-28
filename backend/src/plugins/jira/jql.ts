@@ -10,12 +10,12 @@ export function normalizeJql(raw: unknown, preferredProject?: string | null): st
 
   if (!trimmed) {
     return project
-      ? `project = ${project} AND updated >= -120d ORDER BY updated DESC`
-      : 'updated >= -120d ORDER BY updated DESC';
+      ? `project = ${project} ORDER BY updated DESC`
+      : 'ORDER BY updated DESC';
   }
   if (/^order\s+by\b/i.test(trimmed)) {
-    const base = project ? `project = ${project} AND updated >= -120d` : 'updated >= -120d';
-    return `${base} ${trimmed}`;
+    const base = project ? `project = ${project}` : '';
+    return `${base}${base ? ' ' : ''}${trimmed}`;
   }
 
   const asKey = resolveIssueKey(trimmed, preferredProject);

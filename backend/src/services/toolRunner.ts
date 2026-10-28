@@ -164,7 +164,8 @@ async function executeAllowedTool(
   const outcome = await runTool(canonicalId, req.args, {
     credential,
     metadata,
-    refreshAccessToken: (token) => updateInstallationAccessToken(installation.id, token, credential),
+    refreshAccessToken: (token, refreshToken) =>
+      updateInstallationAccessToken(installation.id, token, credential, refreshToken),
   });
 
   if (!outcome.ok && outcome.authFailed) {

@@ -41,6 +41,8 @@ export interface PluginOAuthSpec {
   identity: (response: any) => Record<string, any>;
   /** Overrides identity with an authenticated profile fetch when needed. */
   fetchIdentity?: (accessToken: string) => Promise<Record<string, any>>;
+  /** Fail the OAuth flow when account identity could not be resolved. */
+  identityRequired?: boolean;
 }
 
 export interface PluginModule {
