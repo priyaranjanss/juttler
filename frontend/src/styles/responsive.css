@@ -29,15 +29,6 @@ body {
     display: grid !important;
     grid-template-columns: 1fr !important;
   }
-
-  /* Utility classes for mobile */
-  .mobile-hide {
-    display: none !important;
-  }
-
-  .mobile-show {
-    display: block !important;
-  }
 }
 
 /* Tablet adjustments */
@@ -59,6 +50,12 @@ body {
 /* Tailwind overrides */
 @layer utilities {
   .container {
-    @apply max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8;
+    @apply max-w-[calc(var(--max-width))] mx-auto px-4 sm:px-6 lg:px-8;
   }
 }
+
+/* Use Tailwind's built-in responsive utilities */
+/* Example: Hide on mobile, show on desktop */
+/* Replace custom classes with: hidden md:block */
+/* Example: Hide on desktop, show on mobile */
+/* Replace custom classes with: block md:hidden */
