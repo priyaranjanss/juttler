@@ -1,0 +1,64 @@
+:root {
+  --max-width: 1200px;
+  --gutter: 1rem;
+}
+
+/* Base responsive styles */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+
+/* Viewport meta tag for mobile scaling */
+@media (max-width: 768px) {
+  html {
+    font-size: 14px;
+  }
+
+  body {
+    padding: 0 0.5rem;
+  }
+
+  /* Flexbox adjustments for mobile */
+  .flex-col {
+    flex-direction: column !important;
+  }
+
+  /* Grid adjustments for mobile */
+  .grid {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Utility classes for mobile */
+  .mobile-hide {
+    display: none !important;
+  }
+
+  .mobile-show {
+    display: block !important;
+  }
+}
+
+/* Tablet adjustments */
+@media (min-width: 769px) and (max-width: 1024px) {
+  body {
+    padding: 0 1rem;
+  }
+}
+
+/* Desktop adjustments */
+@media (min-width: 1025px) {
+  body {
+    max-width: var(--max-width);
+    margin: 0 auto;
+    padding: 0 var(--gutter);
+  }
+}
+
+/* Tailwind overrides */
+@layer utilities {
+  .container {
+    @apply max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8;
+  }
+}
