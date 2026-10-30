@@ -2,7 +2,35 @@
 
 Juttler coordinates an autonomous AI workforce: a Chief of Staff supervisor, specialist bot teammates, human approval gates for sensitive actions, reusable skills, scheduled routines, and a full audit trail.
 
+**TEST COMMENT: Added by Chief for PR validation**
+
 **Stack:** React + Vite (frontend) · Express + Neon Postgres (backend) · Clerk auth · Upstash Redis (coming) · Gemini (bot replies)
+
+## Architecture
+
+```
+juttler/
+├── neon.ts              # Neon CLI config (branch policy)
+├── .env.local           # Neon-managed variables (DATABASE_URL, NEON_BRANCH)
+├── backend/
+│   ├── db/                     # schema.sql + migrate.ts (run: npm run db:migrate)
+│   └── src/
+│       ├── server.ts            # entry: app setup, auth guard, router mounting
+│       ├── config/              # db (Neon), aiClient (Gemini)
+│       ├── middleware/auth.ts   # Bearer-token sessions, admin guard
+│       ├── repositories/        # data access layer (one module per domain)
+│       ├── routes/              # one Express router per domain
+│       └── services/            # aiService, toolService
+└── frontend/
+    └── src/
+        ├── router.tsx           # History-API routes (/login, /register, /admin, /workspace)
+        ├── components/
+        │   ├── auth/            # LoginPage, RegisterPage
+        │   ├── admin/           # AdminShell (admin console)
+        │   ├── workspace/       # UserShell (user workspace)
+        │   └── ...              # dashboard, chat, bots, approvals, skills, routines, activity
+        └── contexts/            # AppContext (session, data, toast)
+```
 
 ## Architecture
 
