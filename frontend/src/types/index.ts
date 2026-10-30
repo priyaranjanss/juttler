@@ -23,6 +23,8 @@ export const AI_PROVIDERS = {
   free_endpoint: {
     label: 'Free Model Endpoint',
     endpoint: 'https://allaitools-generate.freemodels.workers.dev/api/chat',
+    model: 'sol',
+    reasoningModel: 'claude-sonnet-5',
   },
 } as const;
 

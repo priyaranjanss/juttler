@@ -122,37 +122,16 @@ export function assertWorkScope(bot: WorkDesk, pluginSlug: string, args: Record<
   }
 }
 
-/** Told to the model on every turn. The same rule applies to every plugin. */
+/** Facts about this bot's work environment, given to the model on every turn. */
 export function describeWorkDesk(bot: WorkDesk): string {
-  const lines = [
-    'You have no computer, no shell, and no local files.',
-    'For any request these tools can do, call them and finish the work. Look up missing names yourself. Do not invent live data.',
-  ];
+  const lines = ['Work environment: you have no computer, shell, or local files; you act only through the tools listed.'];
   if (bot.githubRepos.length === 1) {
-    lines.push(
-      `Your only GitHub repository is ${bot.githubRepos[0]}. Omit repo on GitHub tools (it is filled in). ` +
-        'Use search_code, list_tree, get_file, edit_file (preferred for fixes), write_file, and create_pull_request. Do not merge unless the user approves it.'
-    );
+    lines.push(`GitHub repository configured for this bot: ${bot.githubRepos[0]} (filled in when repo is omitted).`);
   } else if (bot.githubRepos.length > 1) {
-    lines.push(
-      `GitHub repositories you may fully work in: ${bot.githubRepos.join(', ')}. ` +
-        'Pass repo as owner/name. Use search_code, get_file, edit_file, write_file, and create_pull_request. ' +
-        'Do not use any other repository. Do not merge unless the user approves it.'
-    );
+    lines.push(`GitHub repositories configured for this bot: ${bot.githubRepos.join(', ')}. Other repositories are refused.`);
   }
   if (bot.jiraProject) {
-    lines.push(
-      `Preferred Jira project key: ${bot.jiraProject}. ` +
-        `A bare number like "9" means ${bot.jiraProject}-9. ` +
-        'When the user names an issue key (or continues work on one from the thread), call jira.get_ticket with that key. ' +
-        'For new tickets, use this project unless they name another. ' +
-        'You can search, create, update, comment, assign, and change status on any issue this account can access.'
-    );
-  } else {
-    lines.push(
-      'Jira: use list_projects / search_tickets when you need to discover keys; get_ticket when a key is known. ' +
-        'You can create, update, comment, assign, and change status.'
-    );
+    lines.push(`Jira project configured for this bot: ${bot.jiraProject} (used when a project is omitted).`);
   }
   return lines.join('\n');
 }

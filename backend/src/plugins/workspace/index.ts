@@ -1,11 +1,10 @@
 /**
- * Workspace tools â€” the actions a user can take that the Chief of Staff can
- * take on their behalf.
+ * Workspace tools — the actions a user can take in the app that the Chief of
+ * Staff can take on their behalf: bots and every one of their settings, which
+ * plugin tools each bot may use, the team, and group chats.
  *
- * These are the management surface (bots, plugins, per-bot tool access) rather
- * than the plugins' own actions. The Chief looks up what a plugin needs via
- * get_plugin_requirements instead of being told, so nothing about a provider's
- * prerequisites is hardcoded in the bot's instructions.
+ * Connecting a plugin account is the one thing left to the user: credentials
+ * and sign-in happen in the Plugins screen, never through a bot.
  *
  * Anything that changes workspace state runs immediately when the Chief asks
  * for it. The approval gate still applies to a plugin's own sensitive tools
@@ -13,24 +12,31 @@
  */
 
 import { Bot } from '../../types';
-import { BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS } from '../../constants';
+import { AI_PROVIDERS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS } from '../../constants';
 import {
   listBotsForUser,
   createBot,
   updateBot,
   deleteBot,
   findBotById,
+  clearChiefOfStaff,
+  publishTeamBot,
 } from '../../repositories/bots';
 import {
   listPluginDefinitions,
   findPluginDefinitionBySlug,
   findInstallationByUserAndPlugin,
   listInstallations,
-  createInstallation,
   deleteInstallation,
   listBotAccess,
   upsertBotAccess,
 } from '../../repositories/plugins';
+import { findUserById, findUserByEmail } from '../../repositories/users';
+import { addMember, ensureOwnedTeam, findMembership, findPrimaryTeam, listMembers, canManageTeam } from '../../repositories/teams';
+import { createConversation } from '../../repositories/conversations';
+import { findSlackAppByBotId } from '../../repositories/slackApps';
+import { syncSlackProfile } from '../../services/slackTeam/install';
+import { normalizeProject, normalizeRepos } from '../../services/workScope';
 import { isChiefOfStaffBot } from '../../config/chiefOfStaff';
 import { registry, resolveTool, listAllTools } from '..';
 
@@ -49,53 +55,73 @@ export interface WorkspaceToolResult {
   result: any;
 }
 
+const REASONING_MODES = ['off', 'think', 'big_brain'] as const;
+const AI_PROVIDER_KEYS = Object.keys(AI_PROVIDERS);
+
+/** Every setting a bot has, shared by create_bot and update_bot. */
+const BOT_SETTING_PROPERTIES: WorkspaceToolSpec['parameters']['properties'] = {
+  role_title: { type: 'string', description: 'Role / title, e.g. "Research Lead"' },
+  system_prompt: { type: 'string', description: 'The instructions (description) that define how the Bot behaves' },
+  avatar: { type: 'string', description: 'Avatar shape', enum: [...BOT_AVATAR_SHAPES] },
+  color: { type: 'string', description: `Avatar colour as #RRGGBB, e.g. ${BOT_AVATAR_COLORS.join(', ')}` },
+  memory_enabled: { type: 'boolean', description: 'Whether the Bot remembers earlier conversation' },
+  reasoning_mode: { type: 'string', description: 'How much the Bot reasons before replying', enum: [...REASONING_MODES] },
+  ai_provider: { type: 'string', description: 'Which AI provider runs the Bot', enum: AI_PROVIDER_KEYS },
+  ai_model: { type: 'string', description: 'Model id on the AI provider (not used by the free endpoint)' },
+  ai_api_key: { type: 'string', description: 'API key for the AI provider. Stored encrypted and never shown again.' },
+  jira_project: { type: 'string', description: 'The one Jira project key this Bot may touch, e.g. ABC. Empty clears it.' },
+  github_repos: { type: 'string', description: 'Comma-separated owner/name GitHub repositories this Bot may use. Empty clears them.' },
+};
+
 /** Every workspace tool, keyed by name. */
 export const WORKSPACE_TOOLS: WorkspaceToolSpec[] = [
   {
     name: 'get_team_roster',
-    description:
-      'List every specialist Bot this user owns with its role, purpose, and which plugin tools it may use. Use this before delegating or creating a new Bot.',
+    description: 'List every Bot this user owns with its role, purpose, and which plugin tools it may use.',
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'get_bot',
+    description:
+      'Read every setting of one Bot (including the Chief itself): name, role, full instructions, appearance, memory, reasoning mode, AI provider and model, work scope, plugin tool access, team and Slack status.',
+    parameters: {
+      type: 'object',
+      properties: { bot_name: { type: 'string', description: 'Name of the Bot' } },
+      required: ['bot_name'],
+    },
+  },
+  {
     name: 'create_bot',
-      description:
-        'Create a new specialist Bot for the user. Derive a good name, role, and system prompt from the request and your knowledge of the team. Do not interrogate the user for these — make sensible choices and say what you picked.',
+    description: 'Create a new Bot with any of its settings.',
     parameters: {
       type: 'object',
       properties: {
         name: { type: 'string', description: 'Short display name, e.g. "Atlas"' },
-        role_title: { type: 'string', description: 'What this Bot is, e.g. "Research Lead"' },
-        system_prompt: { type: 'string', description: 'Instructions describing how the Bot should behave' },
-        avatar: { type: 'string', description: 'Avatar shape', enum: [...BOT_AVATAR_SHAPES] },
-        color: { type: 'string', description: 'Avatar colour (hex)', enum: [...BOT_AVATAR_COLORS] },
-        tools: {
-          type: 'string',
-          description: 'Plugin tool names this Bot may use, comma separated. Leave empty for none.',
-        },
+        ...BOT_SETTING_PROPERTIES,
+        team_bot: { type: 'boolean', description: 'Create it as a Team Bot that can be published to the team and given its own Slack app' },
+        tools: { type: 'string', description: 'Comma-separated plugin tool names this Bot may use' },
       },
-      required: ['name', 'role_title', 'system_prompt'],
+      required: ['name', 'role_title'],
     },
   },
   {
     name: 'update_bot',
-    description: 'Change an existing Bot: its name, role, instructions, avatar, or colour.',
+    description:
+      'Change any setting of an existing Bot, including the Chief itself. Only the settings passed are changed. Returns the Bot as saved.',
     parameters: {
       type: 'object',
       properties: {
         bot_name: { type: 'string', description: 'Current name of the Bot to change' },
         name: { type: 'string', description: 'New name' },
-        role_title: { type: 'string', description: 'New role / title' },
-        system_prompt: { type: 'string', description: 'New instructions' },
-        avatar: { type: 'string', description: 'New avatar shape', enum: [...BOT_AVATAR_SHAPES] },
-        color: { type: 'string', description: 'New avatar colour', enum: [...BOT_AVATAR_COLORS] },
+        ...BOT_SETTING_PROPERTIES,
+        make_chief: { type: 'boolean', description: 'true makes this Bot the Chief of Staff in place of the current one' },
       },
       required: ['bot_name'],
     },
   },
   {
     name: 'delete_bot',
-    description: 'Remove one of the user\'s specialist Bots. Never use this on the Chief of Staff.',
+    description: "Remove one of the user's Bots. The current Chief of Staff cannot be deleted.",
     parameters: {
       type: 'object',
       properties: { bot_name: { type: 'string', description: 'Name of the Bot to delete' } },
@@ -105,30 +131,26 @@ export const WORKSPACE_TOOLS: WorkspaceToolSpec[] = [
   {
     name: 'set_bot_tools',
     description:
-      'Choose which plugin tools a specific Bot is allowed to use. The plugin must already be connected, and the tools must belong to that plugin.',
+      "Choose which tools of a connected plugin a Bot may use. An empty list turns that plugin off for the Bot.",
     parameters: {
       type: 'object',
       properties: {
         bot_name: { type: 'string', description: 'Name of the Bot' },
         plugin_slug: { type: 'string', description: 'Plugin slug, e.g. "github"' },
-        tools: {
-          type: 'string',
-          description: 'Comma-separated tool names to enable. An empty string disables all of that plugin\'s tools for the Bot.',
-        },
+        tools: { type: 'string', description: "Comma-separated tool names of that plugin; empty disables the plugin's tools for the Bot" },
       },
       required: ['bot_name', 'plugin_slug', 'tools'],
     },
   },
   {
     name: 'list_plugins',
-    description:
-      'List every plugin in the marketplace, whether each is connected, and how many tools it offers. Use this before suggesting a connection.',
+    description: 'List every plugin in the marketplace, whether the user has connected it, and what connecting it requires.',
     parameters: { type: 'object', properties: {} },
   },
   {
     name: 'get_plugin_requirements',
     description:
-      'Look up exactly what a plugin needs before it can be connected (for example a site, an email, and a token). Call this before asking the user for credentials so you request the right things.',
+      'Look up what the user must provide in the Plugins screen to connect a plugin. Plugin accounts are connected by the user, not by a Bot.',
     parameters: {
       type: 'object',
       properties: { plugin_slug: { type: 'string', description: 'Plugin slug to inspect, e.g. "jira"' } },
@@ -136,29 +158,47 @@ export const WORKSPACE_TOOLS: WorkspaceToolSpec[] = [
     },
   },
   {
-    name: 'connect_plugin',
-    description:
-      'Connect a plugin for the user, once you have collected every field that get_plugin_requirements reported. Values are stored encrypted and never shown again.',
-    parameters: {
-      type: 'object',
-      properties: {
-        plugin_slug: { type: 'string', description: 'Plugin slug to connect' },
-        credentials: {
-          type: 'string',
-          description:
-            'JSON object of the fields returned by get_plugin_requirements, e.g. {"site":"acme","email":"a@b.com","apiToken":"..."}',
-        },
-      },
-      required: ['plugin_slug', 'credentials'],
-    },
-  },
-  {
     name: 'disconnect_plugin',
-    description: 'Disconnect a plugin the user no longer wants, removing every Bot\'s access to its tools.',
+    description: "Disconnect a plugin account, removing every Bot's access to its tools.",
     parameters: {
       type: 'object',
       properties: { plugin_slug: { type: 'string', description: 'Plugin slug to disconnect' } },
       required: ['plugin_slug'],
+    },
+  },
+  {
+    name: 'get_team',
+    description: "Read the user's team: its name, the people on it with their roles, and whether each has linked Slack.",
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'invite_team_member',
+    description: 'Add a person who already has a Juttler account to the team, by email.',
+    parameters: {
+      type: 'object',
+      properties: { email: { type: 'string', description: "The person's Juttler account email" } },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'publish_team_bot',
+    description: 'Publish a Team Bot so the whole team can use it.',
+    parameters: {
+      type: 'object',
+      properties: { bot_name: { type: 'string', description: 'Name of the Team Bot' } },
+      required: ['bot_name'],
+    },
+  },
+  {
+    name: 'create_group_chat',
+    description: 'Start a new chat with one or more Bots.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Title of the chat' },
+        bot_names: { type: 'string', description: 'Comma-separated names of the Bots in the chat' },
+      },
+      required: ['title', 'bot_names'],
     },
   },
 ];
@@ -174,30 +214,57 @@ export async function describeRoster(userId: string): Promise<{
   bots: Array<{ name: string; roleTitle: string; isChief: boolean; purpose: string; tools: string[] }>;
 }> {
   const roster = await listBotsForUser(userId);
-  // Fetch definitions once rather than per bot inside the loop.
-  const definitions = await listPluginDefinitions();
   const out: Array<{ name: string; roleTitle: string; isChief: boolean; purpose: string; tools: string[] }> = [];
 
   for (const bot of roster) {
-    const access = await listBotAccess(bot.id);
-    const tools: string[] = [];
-    for (const entry of access) {
-      const def = definitions.find((d) => d.slug === entry.pluginSlug);
-      for (const enabled of entry.enabledTools) {
-        tools.push(def ? `${entry.pluginSlug}.${enabled}` : enabled);
-      }
-    }
-
     out.push({
       name: bot.name,
       roleTitle: bot.roleTitle,
       isChief: isChiefOfStaffBot(bot),
       purpose: oneLine(bot.systemPrompt, 220),
-      tools,
+      tools: await enabledToolIds(bot.id),
     });
   }
 
   return { bots: out };
+}
+
+async function enabledToolIds(botId: string): Promise<string[]> {
+  const access = await listBotAccess(botId);
+  const tools: string[] = [];
+  for (const entry of access) {
+    for (const enabled of entry.enabledTools) {
+      tools.push(resolveTool(registry, enabled)?.id ?? `${entry.pluginSlug}.${enabled}`);
+    }
+  }
+  return tools;
+}
+
+/** Every setting of a bot, as the Chief reads it. The API key itself is never returned. */
+async function describeBot(bot: Bot) {
+  const slackApp = await findSlackAppByBotId(bot.id);
+  return {
+    name: bot.name,
+    role_title: bot.roleTitle,
+    system_prompt: bot.systemPrompt,
+    avatar: bot.avatar,
+    color: bot.color,
+    is_chief: isChiefOfStaffBot(bot),
+    memory_enabled: bot.memoryEnabled,
+    reasoning_mode: bot.reasoningMode,
+    ai_provider: bot.aiProvider,
+    ai_model:
+      bot.aiProvider === 'free_endpoint'
+        ? `${AI_PROVIDERS.free_endpoint.model} (tool calls) + ${AI_PROVIDERS.free_endpoint.reasoningModel} (reasoning)`
+        : bot.aiModel || null,
+    ai_api_key_saved: Boolean(bot.aiApiKey),
+    jira_project: bot.jiraProject,
+    github_repos: bot.githubRepos,
+    tools: await enabledToolIds(bot.id),
+    team_bot: bot.isTeamBot,
+    published: Boolean(bot.publishedAt),
+    slack_app: slackApp?.status ?? 'not_connected',
+  };
 }
 
 function oneLine(text: string, max: number): string {
@@ -213,6 +280,76 @@ function parseList(value: unknown): string[] {
     .filter(Boolean);
 }
 
+function parseBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  const text = String(value ?? '').trim().toLowerCase();
+  if (['true', 'yes', 'on', '1'].includes(text)) return true;
+  if (['false', 'no', 'off', '0'].includes(text)) return false;
+  return undefined;
+}
+
+/**
+ * Turns tool arguments into the bot columns they change, validated the same
+ * way the bot settings screen validates them. Absent arguments change nothing.
+ */
+function botSettingsFromArgs(args: Record<string, any>): { updates: Record<string, unknown> } | { error: string } {
+  const updates: Record<string, unknown> = {};
+  const has = (key: string) => args[key] !== undefined && args[key] !== null;
+  const text = (key: string) => String(args[key]).trim();
+
+  for (const [key, field] of [['name', 'name'], ['role_title', 'roleTitle'], ['system_prompt', 'systemPrompt']] as const) {
+    if (!has(key)) continue;
+    if (!text(key)) return { error: `${key} cannot be empty.` };
+    updates[field] = text(key);
+  }
+
+  if (has('avatar')) {
+    if (!(BOT_AVATAR_SHAPES as readonly string[]).includes(text('avatar'))) {
+      return { error: `avatar must be one of: ${BOT_AVATAR_SHAPES.join(', ')}.` };
+    }
+    updates.avatar = text('avatar');
+  }
+
+  if (has('color')) {
+    if (!/^#[0-9a-f]{6}$/i.test(text('color'))) return { error: 'color must be a hex colour like #7C3AED.' };
+    updates.color = text('color');
+  }
+
+  if (has('memory_enabled')) {
+    const memory = parseBoolean(args.memory_enabled);
+    if (memory === undefined) return { error: 'memory_enabled must be true or false.' };
+    updates.memoryEnabled = memory;
+  }
+
+  if (has('reasoning_mode')) {
+    if (!(REASONING_MODES as readonly string[]).includes(text('reasoning_mode'))) {
+      return { error: `reasoning_mode must be one of: ${REASONING_MODES.join(', ')}.` };
+    }
+    updates.reasoningMode = text('reasoning_mode');
+  }
+
+  if (has('ai_provider')) {
+    const provider = text('ai_provider');
+    if (!AI_PROVIDER_KEYS.includes(provider)) {
+      return { error: `ai_provider must be one of: ${AI_PROVIDER_KEYS.join(', ')}.` };
+    }
+    updates.aiProvider = provider;
+    updates.aiEndpoint = AI_PROVIDERS[provider as keyof typeof AI_PROVIDERS].endpoint;
+  }
+
+  if (has('ai_model')) updates.aiModel = text('ai_model');
+  if (has('ai_api_key') && text('ai_api_key')) updates.aiApiKey = text('ai_api_key');
+
+  try {
+    if (has('jira_project') || args.jira_project === null) updates.jiraProject = normalizeProject(args.jira_project);
+    if (has('github_repos')) updates.githubRepos = normalizeRepos(parseList(args.github_repos));
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+
+  return { updates };
+}
+
 /** Resolves a bot by name for this user. */
 async function resolveBot(userId: string, botName: string): Promise<Bot | null> {
   const wanted = String(botName || '').trim().toLowerCase();
@@ -221,7 +358,24 @@ async function resolveBot(userId: string, botName: string): Promise<Bot | null> 
   return roster.find((b) => b.name.toLowerCase() === wanted) || null;
 }
 
-/** Executes one workspace tool. Read-only tools run immediately. */
+async function noSuchBot(userId: string, botName: unknown): Promise<WorkspaceToolResult> {
+  const roster = await listBotsForUser(userId);
+  return {
+    ok: false,
+    result: { error: `No Bot named "${String(botName ?? '')}". Bots: ${roster.map((b) => b.name).join(', ')}` },
+  };
+}
+
+/** Saves bot settings and keeps the bot's Slack app profile in step with them. */
+async function saveBot(bot: Bot, updates: Record<string, unknown>): Promise<Bot | null> {
+  const updated = await updateBot(bot.id, updates);
+  if (updated && (updates.name !== undefined || updates.color !== undefined || updates.roleTitle !== undefined)) {
+    void syncSlackProfile(updated).catch((err) => console.error('Slack profile sync failed:', err));
+  }
+  return updated;
+}
+
+/** Executes one workspace tool. */
 export async function executeWorkspaceTool(
   toolName: string,
   args: Record<string, any>,
@@ -231,103 +385,105 @@ export async function executeWorkspaceTool(
     case 'get_team_roster':
       return { ok: true, result: await describeRoster(ctx.userId) };
 
+    case 'get_bot': {
+      const target = await resolveBot(ctx.userId, args.bot_name);
+      if (!target) return noSuchBot(ctx.userId, args.bot_name);
+      return { ok: true, result: await describeBot(target) };
+    }
+
     case 'create_bot': {
-      const name = String(args.name || '').trim();
-      const roleTitle = String(args.role_title || '').trim();
-      const systemPrompt = String(args.system_prompt || '').trim();
-
-      if (!name || !roleTitle || !systemPrompt) {
-        return { ok: false, result: { error: 'name, role_title and system_prompt are all required.' } };
+      const settings = botSettingsFromArgs(args);
+      if ('error' in settings) return { ok: false, result: { error: settings.error } };
+      const { name, roleTitle, ...rest } = settings.updates as { name?: string; roleTitle?: string };
+      if (!name || !roleTitle) {
+        return { ok: false, result: { error: 'name and role_title are required.' } };
       }
-
       if (await resolveBot(ctx.userId, name)) {
         return { ok: false, result: { error: `A Bot named "${name}" already exists.` } };
       }
 
-      // A new Bot starts with no tools; the user grants them afterwards with
-      // set_bot_tools so nothing is enabled by surprise.
+      const teamBot = parseBoolean(args.team_bot) === true;
+      let teamId: string | null = null;
+      if (teamBot) {
+        const owner = await findUserById(ctx.userId);
+        teamId = (await ensureOwnedTeam(ctx.userId, owner?.name || 'My')).id;
+      }
+
       const created = await createBot({
         userId: ctx.userId,
         name,
         roleTitle,
-        systemPrompt,
-        avatar: String(args.avatar || 'blob'),
-        color: String(args.color || '#6366f1'),
         allowedTools: [],
         isChiefOfStaff: false,
+        isTeamBot: teamBot,
+        teamId,
       });
+      const saved = Object.keys(rest).length > 0 ? (await updateBot(created.id, rest)) ?? created : created;
 
-      // If the Chief named tools, grant them straight away where they exist
       const wantedTools = parseList(args.tools);
-      if (wantedTools.length > 0) {
-        await grantToolsForNewBot(ctx.userId, created.id, wantedTools);
-      }
+      const granted = await grantToolsForNewBot(ctx.userId, saved.id, wantedTools);
 
       return {
         ok: true,
         result: {
           created: true,
-          bot: { name: created.name, roleTitle: created.roleTitle, id: created.id },
-          tools: wantedTools,
-          note: 'The Bot has its own AI settings. Set its API key and model in bot settings before it can answer; its connected tools are configured separately.',
+          bot: await describeBot(saved),
+          ...(granted.skipped.length > 0 ? { tools_not_granted: granted.skipped } : {}),
         },
       };
     }
 
     case 'update_bot': {
       const target = await resolveBot(ctx.userId, args.bot_name);
-      if (!target) return { ok: false, result: { error: `No Bot named "${args.bot_name}".` } };
+      if (!target) return noSuchBot(ctx.userId, args.bot_name);
 
-      if (isChiefOfStaffBot(target) && (args.name || args.role_title || args.system_prompt)) {
-        // Renaming the front door would break routing, so only cosmetics move
-        const updated = await updateBot(target.id, {
-          ...(args.avatar ? { avatar: String(args.avatar) } : {}),
-          ...(args.color ? { color: String(args.color) } : {}),
-        });
-        return {
-          ok: true,
-          result: {
-            updated: true,
-            name: updated?.name,
-            note: 'The Chief of Staff keeps its identity; only its appearance changed.',
-          },
-        };
+      const settings = botSettingsFromArgs(args);
+      if ('error' in settings) return { ok: false, result: { error: settings.error } };
+      const updates = settings.updates;
+
+      if (typeof updates.name === 'string' && updates.name.toLowerCase() !== target.name.toLowerCase()) {
+        if (await resolveBot(ctx.userId, updates.name)) {
+          return { ok: false, result: { error: `A Bot named "${updates.name}" already exists.` } };
+        }
       }
 
-      const updated = await updateBot(target.id, {
-        ...(args.name ? { name: String(args.name).trim() } : {}),
-        ...(args.role_title ? { roleTitle: String(args.role_title).trim() } : {}),
-        ...(args.system_prompt ? { systemPrompt: String(args.system_prompt).trim() } : {}),
-        ...(args.avatar ? { avatar: String(args.avatar) } : {}),
-        ...(args.color ? { color: String(args.color) } : {}),
-      });
+      const makeChief = parseBoolean(args.make_chief) === true;
+      if (makeChief) {
+        if (target.isTeamBot) return { ok: false, result: { error: 'A Team Bot cannot be the Chief.' } };
+        await clearChiefOfStaff(ctx.userId, target.id);
+        updates.isChiefOfStaff = true;
+      }
 
-      return { ok: true, result: { updated: true, name: updated?.name, roleTitle: updated?.roleTitle } };
+      if (Object.keys(updates).length === 0) {
+        return { ok: false, result: { error: 'No settings to change were given.', settings: Object.keys(BOT_SETTING_PROPERTIES) } };
+      }
+
+      const updated = await saveBot(target, updates);
+      if (!updated) return { ok: false, result: { error: `"${target.name}" could not be updated.` } };
+      return { ok: true, result: { updated: true, bot: await describeBot(updated) } };
     }
 
     case 'delete_bot': {
       const target = await resolveBot(ctx.userId, args.bot_name);
-      if (!target) return { ok: false, result: { error: `No Bot named "${args.bot_name}".` } };
+      if (!target) return noSuchBot(ctx.userId, args.bot_name);
       if (isChiefOfStaffBot(target)) {
-        return { ok: false, result: { error: 'The Chief of Staff cannot be deleted â€” it is the workspace front door.' } };
+        return { ok: false, result: { error: 'The current Chief of Staff cannot be deleted. Another Bot must be made Chief first.' } };
       }
 
-      const removed = target.name;
       await deleteBot(target.id);
-      return { ok: true, result: { deleted: true, name: removed } };
+      return { ok: true, result: { deleted: true, name: target.name } };
     }
 
     case 'set_bot_tools': {
       const target = await resolveBot(ctx.userId, args.bot_name);
-      if (!target) return { ok: false, result: { error: `No Bot named "${args.bot_name}".` } };
+      if (!target) return noSuchBot(ctx.userId, args.bot_name);
 
       const slug = String(args.plugin_slug || '').trim();
       const installation = await findInstallationByUserAndPlugin(ctx.userId, slug);
       if (!installation) {
-        return { ok: false, result: { error: `The "${slug}" plugin is not connected. Connect it first.` } };
+        return { ok: false, result: { error: `The "${slug}" plugin is not connected.` } };
       }
 
-      const definition = await findPluginDefinitionBySlug(slug);
       const validIds = listAllTools(registry)
         .filter((t) => t.pluginSlug === slug)
         .map((t) => t.id);
@@ -373,6 +529,7 @@ export async function executeWorkspaceTool(
             category: d.category,
             toolCount: d.tools.length,
             connected: connected.has(d.slug),
+            connects_with: d.authType === 'oauth' ? 'sign-in' : 'credentials',
             needs: (d.requiredCredentials ?? []).map((c: any) => c.label),
           })),
         },
@@ -391,59 +548,13 @@ export async function executeWorkspaceTool(
           plugin: definition.name,
           slug,
           alreadyConnected: Boolean(installation),
+          connected_by: 'the user, in the Plugins screen',
+          connects_with: definition.authType === 'oauth' ? 'sign-in' : 'credentials',
           requiredFields: (definition.requiredCredentials ?? []).map((c: any) => ({
-            field: c.key,
-            ask_user_for: c.label,
+            label: c.label,
             secret: c.secret,
             example: c.placeholder,
           })),
-          // Credentials are the one thing a bot genuinely cannot supply itself,
-          // so collecting these is a legitimate reason to talk to the user.
-          instruction:
-            'These credentials cannot be guessed — ask the user for each field above, then call connect_plugin with those values. Everything else you should decide yourself.',
-        },
-      };
-    }
-
-    case 'connect_plugin': {
-      const slug = String(args.plugin_slug || '').trim();
-      const definition = await findPluginDefinitionBySlug(slug);
-      if (!definition) return { ok: false, result: { error: `Unknown plugin "${slug}".` } };
-
-      let credential: Record<string, any> = {};
-      try {
-        credential = typeof args.credentials === 'string' ? JSON.parse(args.credentials) : args.credentials || {};
-      } catch {
-        return { ok: false, result: { error: 'credentials must be a JSON object.' } };
-      }
-
-      // Validate against what the plugin says it needs, rather than a hardcoded list
-      const specs = definition.requiredCredentials ?? [];
-      const missing = specs.filter((s: any) => !String(credential[s.key] ?? '').trim());
-      if (missing.length > 0) {
-        return {
-          ok: false,
-          result: {
-            error: `Missing required field(s): ${missing.map((m: any) => m.label).join(', ')}`,
-            requiredFields: specs.map((s: any) => ({ field: s.key, ask_user_for: s.label })),
-          },
-        };
-      }
-
-      const installation = await createInstallation({
-        userId: ctx.userId,
-        pluginId: definition.id,
-        credential,
-        metadata: slug === 'jira' ? { site: String(credential.site || '') } : {},
-      });
-
-      return {
-        ok: true,
-        result: {
-          connected: true,
-          plugin: definition.name,
-          toolCount: definition.tools.length,
-          note: 'The account is connected. Each bot stays off until its own switch is turned on.',
         },
       };
     }
@@ -457,6 +568,81 @@ export async function executeWorkspaceTool(
       return { ok: true, result: { disconnected: true, plugin: slug } };
     }
 
+    case 'get_team': {
+      const found = await findPrimaryTeam(ctx.userId);
+      if (!found) return { ok: true, result: { team: null } };
+      const members = await listMembers(found.team.id);
+      return {
+        ok: true,
+        result: {
+          team: found.team.name,
+          your_role: found.role,
+          members: members.map((m) => ({
+            name: m.name,
+            email: m.email,
+            role: m.role,
+            slack_linked: Boolean(m.slackUserId),
+          })),
+        },
+      };
+    }
+
+    case 'invite_team_member': {
+      const email = String(args.email || '').trim();
+      if (!email) return { ok: false, result: { error: 'email is required.' } };
+
+      const owner = await findUserById(ctx.userId);
+      const found = (await findPrimaryTeam(ctx.userId)) ?? { team: await ensureOwnedTeam(ctx.userId, owner?.name || 'My'), role: 'owner' as const };
+      const actor = await findMembership(found.team.id, ctx.userId);
+      if (!actor || !canManageTeam(actor.role)) {
+        return { ok: false, result: { error: 'Only the team owner or a manager can invite people.' } };
+      }
+
+      const user = await findUserByEmail(email);
+      if (!user) return { ok: false, result: { error: `No Juttler account uses ${email}. They need an account before they can join.` } };
+      if (user.id === ctx.userId) return { ok: false, result: { error: 'That is the user themself.' } };
+      if (await findMembership(found.team.id, user.id)) {
+        return { ok: false, result: { error: `${user.name} is already on the team.` } };
+      }
+
+      await addMember(found.team.id, user.id, 'member');
+      return { ok: true, result: { added: true, team: found.team.name, name: user.name, email: user.email, role: 'member' } };
+    }
+
+    case 'publish_team_bot': {
+      const target = await resolveBot(ctx.userId, args.bot_name);
+      if (!target) return noSuchBot(ctx.userId, args.bot_name);
+      if (!target.isTeamBot) return { ok: false, result: { error: `"${target.name}" is not a Team Bot.` } };
+
+      const published = await publishTeamBot(target.id);
+      if (!published) return { ok: false, result: { error: `"${target.name}" could not be published.` } };
+      return { ok: true, result: { published: true, bot: published.name } };
+    }
+
+    case 'create_group_chat': {
+      const title = String(args.title || '').trim();
+      if (!title) return { ok: false, result: { error: 'title is required.' } };
+
+      const roster = await listBotsForUser(ctx.userId);
+      const names = parseList(args.bot_names);
+      const missing = names.filter((name) => !roster.some((b) => b.name.toLowerCase() === name.toLowerCase()));
+      if (names.length === 0 || missing.length > 0) {
+        return {
+          ok: false,
+          result: { error: `${missing.length ? `No Bot named: ${missing.join(', ')}. ` : ''}Bots: ${roster.map((b) => b.name).join(', ')}` },
+        };
+      }
+
+      const bots = names.map((name) => roster.find((b) => b.name.toLowerCase() === name.toLowerCase())!);
+      const conversation = await createConversation({
+        userId: ctx.userId,
+        title,
+        isGroup: bots.length > 1,
+        participantBotIds: [...new Set(bots.map((b) => b.id))],
+      });
+      return { ok: true, result: { created: true, title: conversation.title, bots: bots.map((b) => b.name) } };
+    }
+
     default:
       return { ok: false, result: { error: `Unknown workspace tool "${toolName}".` } };
   }
@@ -467,13 +653,24 @@ export async function executeWorkspaceTool(
  * Names are resolved through the registry, so any spelling the Chief uses
  * (canonical, legacy or bare) grants the same tool.
  */
-async function grantToolsForNewBot(userId: string, botId: string, toolNames: string[]): Promise<void> {
+async function grantToolsForNewBot(
+  userId: string,
+  botId: string,
+  toolNames: string[]
+): Promise<{ skipped: Array<{ tool: string; reason: string }> }> {
+  const skipped: Array<{ tool: string; reason: string }> = [];
   for (const toolName of toolNames) {
     const record = resolveTool(registry, toolName);
-    if (!record) continue;
+    if (!record) {
+      skipped.push({ tool: toolName, reason: 'unknown tool' });
+      continue;
+    }
 
     const installation = await findInstallationByUserAndPlugin(userId, record.pluginSlug);
-    if (!installation) continue;
+    if (!installation) {
+      skipped.push({ tool: toolName, reason: `the ${record.pluginSlug} plugin is not connected` });
+      continue;
+    }
 
     const current = await listBotAccess(botId);
     const existing = current.find((a) => a.installationId === installation.id);
@@ -481,13 +678,7 @@ async function grantToolsForNewBot(userId: string, botId: string, toolNames: str
     merged.add(record.id);
     await upsertBotAccess(botId, installation.id, [...merged]);
   }
-}
-
-async function installationForTool(userId: string, toolName: string) {
-  const record = resolveTool(registry, toolName);
-  if (!record) return null;
-  const installation = await findInstallationByUserAndPlugin(userId, record.pluginSlug);
-  return installation || null;
+  return { skipped };
 }
 
 export { findBotById };

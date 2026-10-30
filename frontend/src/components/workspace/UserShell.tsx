@@ -438,7 +438,9 @@ const BotSettingsPanel: React.FC<BotSettingsPanelProps> = ({
             {detailRow(
               <Cpu className="h-[17px] w-[17px] stroke-[1.7] text-[#0a84ff]" />,
               'AI model',
-              aiModel || AI_PROVIDERS[bot.aiProvider].label
+              bot.aiProvider === 'free_endpoint'
+                ? `${AI_PROVIDERS.free_endpoint.model} + ${AI_PROVIDERS.free_endpoint.reasoningModel} · ${AI_PROVIDERS.free_endpoint.label}`
+                : bot.aiModel || AI_PROVIDERS[bot.aiProvider].label
             )}
             {detailRow(
               <Plug className="h-[17px] w-[17px] stroke-[1.7] text-[#8e8e93]" />,

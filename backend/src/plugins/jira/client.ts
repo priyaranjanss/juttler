@@ -67,7 +67,7 @@ export async function jiraRequest(
     const issueKey = url.match(/\/issue\/([^/?]+)/i)?.[1];
     if (issueKey && /\(404\)/.test(message)) {
       throw new Error(
-        `Jira issue ${decodeURIComponent(issueKey)} was not found or is not visible to the connected account. Use an exact key returned by Jira search; do not guess issue keys.`
+        `Jira issue ${decodeURIComponent(issueKey)} was not found or is not visible to the connected account.`
       );
     }
     if (

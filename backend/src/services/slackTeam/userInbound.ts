@@ -324,22 +324,20 @@ async function handleSlackUserEvent(body: SlackUserEventBody): Promise<void> {
       conversationId,
       systemAddendum:
         [
-          'You are responding in Slack. Treat only this Slack thread history and the current Slack message as the active conversation context. Do not import, reveal, or assume details from unrelated Juttler chats or other Slack channels.',
-          'Follow the bot-specific instructions below together with the task and applicable safety rules. Work independently: answer directly when possible, use relevant enabled Juttler tools for research or actions, and do not claim to have searched Juttler memory unless an available tool actually retrieved that information.',
-          'If the request is ambiguous in a way that could change the result, ask a concise clarifying question in Slack. Ask useful counterquestions when they unblock the task; do not ask for confirmation of ordinary, reversible steps. Respect required approval for sensitive or external actions.',
-          'Use this Slack thread as the primary context. Search connected Juttler services or workspace data when the request needs it, then relate the findings back to the thread without merging unrelated chat histories.',
-          'The reply is posted as the connected Slack user and will automatically start by mentioning the person who sent the message; do not repeat that sender mention. Decide from context whether to mention other people. If you choose to mention someone, use their exact display name with @. Only mention people in this channel roster; never invent a person.',
-          `Channel members you may mention: ${JSON.stringify(mentionTargets.map((target) => ({ names: target.names })))}`,
-          `Additional instructions configured for this bot: ${bot.systemPrompt}`,
+          'Channel: Slack. The conversation history above is this Slack thread only; details from other Juttler chats or Slack channels must not be revealed here.',
+          'Your reply is posted as the connected Slack user and is automatically prefixed with a mention of the sender. Writing @ followed by a member\'s exact display name mentions them.',
+          `Channel members who can be mentioned: ${JSON.stringify(mentionTargets.map((target) => ({ names: target.names })))}`,
+          `Instructions configured for this bot: ${bot.systemPrompt}`,
         ].join('\n\n'),
     });
     if (turn.waitingForApproval) {
-      reply = 'I need approval in Juttler before I can finish that. Open this bot there and approve the pending action.';
-    } else if (turn.error) {
       failed = true;
-      reply = turn.error.message;
+      reply = 'This action is waiting for approval in Juttler.';
+    } else if (turn.error || !turn.text?.trim()) {
+      failed = true;
+      reply = turn.error?.message ?? 'The model did not return a reply.';
     } else {
-      reply = turn.text?.trim() || 'Done.';
+      reply = turn.text.trim();
     }
   } catch (err) {
     failed = true;

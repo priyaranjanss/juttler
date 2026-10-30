@@ -6,7 +6,7 @@ export const slackPlugin: PluginModule = {
     slug: 'slack',
     name: 'Slack',
     description:
-      'Read channels, DMs and message history, and post messages. Messages are sent as you, not as a bot.',
+      'Read channels, DMs, threads and message history, look up people, and post, reply to, edit, or delete messages. Messages are sent as you, not as a bot.',
     category: 'Communication',
     isOfficial: true,
     // Slack is OAuth-only: a user token (xoxp-) is what makes messages appear as
@@ -27,15 +27,41 @@ export const slackPlugin: PluginModule = {
       },
       {
         name: 'read_messages',
-        description: 'Read recent messages from a channel or DM.',
+        description: 'Read recent messages from a channel or DM, with each author\'s name and each message\'s ts and thread info.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            channel: { type: 'string', description: 'Channel id (or name) to read, e.g. "C01ABC23"' },
+            channel: { type: 'string', description: 'Channel id, #name, or a person (for your DM with them)' },
             limit: { type: 'number', description: 'How many messages to return (max 100)' },
           },
           required: ['channel'],
+        },
+      },
+      {
+        name: 'read_thread',
+        description: 'Read a message and all replies in its thread.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            channel: { type: 'string', description: 'Channel id, #name, or a person' },
+            thread_ts: { type: 'string', description: 'ts of the thread\'s parent message' },
+            limit: { type: 'number', description: 'How many messages to return (max 200)' },
+          },
+          required: ['channel', 'thread_ts'],
+        },
+      },
+      {
+        name: 'list_users',
+        description: 'List people in the Slack workspace with their ids, names, and titles, optionally filtered by name.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Text to match against names and titles' },
+            limit: { type: 'number', description: 'How many people to return (max 500)' },
+          },
         },
       },
       {
@@ -54,15 +80,43 @@ export const slackPlugin: PluginModule = {
       {
         name: 'send_message',
         description:
-          'Post a message to a Slack channel or DM immediately as the connected user. Provide the destination as channel (a Slack channel ID or #name) and the exact text to send. This tool sends the message without an approval step.',
+          'Post a message as the connected user to a channel, a DM, or a thread. Sends immediately, without an approval step.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
-            channel: { type: 'string', description: 'Channel id or name, e.g. "#general"' },
+            channel: { type: 'string', description: 'Channel id, #name, or a person (sends them a DM)' },
             text: { type: 'string', description: 'Message text to post' },
+            thread_ts: { type: 'string', description: 'Parent message ts to reply in its thread' },
           },
           required: ['channel', 'text'],
+        },
+      },
+      {
+        name: 'update_message',
+        description: 'Edit a message the connected user posted.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            channel: { type: 'string', description: 'Channel id, #name, or a person' },
+            ts: { type: 'string', description: 'ts of the message to edit' },
+            text: { type: 'string', description: 'New message text' },
+          },
+          required: ['channel', 'ts', 'text'],
+        },
+      },
+      {
+        name: 'delete_message',
+        description: 'Delete a message the connected user posted.',
+        sensitive: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            channel: { type: 'string', description: 'Channel id, #name, or a person' },
+            ts: { type: 'string', description: 'ts of the message to delete' },
+          },
+          required: ['channel', 'ts'],
         },
       },
     ],

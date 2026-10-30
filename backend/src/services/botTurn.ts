@@ -16,36 +16,7 @@ import { callTool, executeApprovedTool } from './pluginGateway';
 import { buildChiefSystemPrompt, isChiefOfStaffBot, RosterEntry, WorkspaceService } from '../config/chiefOfStaff';
 import { WORKSPACE_TOOLS, isWorkspaceTool, executeWorkspaceTool } from '../plugins/workspace';
 import { describeWorkDesk } from './workScope';
-import { resolveThreadIssueKeys } from './issueKeys';
 import { findSlackAppByBotId } from '../repositories/slackApps';
-
-/** Turn free-text ticket mentions into concrete tool instructions (no ticket hardcoding). */
-function ticketWorkHint(
-  messageContent: string,
-  history: Message[],
-  preferredProject: string | null
-): { hint: string; keys: string[] } {
-  const recentUser = history
-    .filter((m) => m.type === 'text' && m.senderType === 'user')
-    .slice(-8)
-    .map((m) => m.content);
-  const keys = resolveThreadIssueKeys({
-    preferredProject,
-    message: messageContent,
-    historyTexts: recentUser,
-  });
-  if (keys.length === 0) return { hint: '', keys: [] };
-  return {
-    keys,
-    hint: [
-      `Issue key(s) in this thread: ${keys.join(', ')}.`,
-      `Call jira.get_ticket with issue_key=${keys[0]} (aliases key/issue/ticket are fine; bare numbers use the preferred project).`,
-      `Short follow-ups like "continue", "do it", or just "9" still refer to that key — resolve from this thread, do not ask again.`,
-      `Read the description, then implement with GitHub tools (search_code → get_file → edit_file → create_pull_request).`,
-      `Do not ask whether to proceed — finish the work, then summarize with the PR URL or blocker.`,
-    ].join(' '),
-  };
-}
 
 export const DELEGATE_TOOL = 'delegate_to_bot';
 
@@ -73,6 +44,28 @@ async function describeServices(userId: string): Promise<WorkspaceService[]> {
     toolCount: p.tools.length,
     needs: connected.has(p.slug) ? [] : p.requiredCredentials.map((c) => c.label),
   }));
+}
+
+async function describeServiceAccess(userId: string, tools: BotToolSpec[]): Promise<string> {
+  const installations = await listInstallations(userId);
+  const byPlugin = new Map(installations.map((installation) => [installation.pluginSlug, installation]));
+
+  const lines = PLUGINS.map((plugin) => {
+    const installation = byPlugin.get(plugin.slug);
+    const enabledTools = tools
+      .filter((tool) => tool.name.startsWith(`${plugin.slug}.`))
+      .map((tool) => tool.name);
+    const status = installation?.status ?? 'not connected';
+    const toolAccess = enabledTools.length > 0
+      ? enabledTools.join(', ')
+      : 'no tools enabled for this bot';
+    return `- ${plugin.name} (${plugin.slug}): installation ${status}; tools available to this bot: ${toolAccess}`;
+  });
+
+  return [
+    "Current space service context (connection state and this bot's enabled tools):",
+    ...lines,
+  ].join('\n');
 }
 
 /** Tool access per bot, keyed by bot id, as canonical "plugin.tool" ids. */
@@ -127,19 +120,26 @@ async function toolSpecsFor(userId: string, botId: string): Promise<BotToolSpec[
 
 /** Human-readable summary shown on the approval card. */
 export function describeWorkspaceTool(toolName: string, args: Record<string, any>): string {
+  const text = (key: string) => String(args[key] || '').trim();
   switch (toolName) {
+    case 'get_bot':
+      return `read the settings of "${text('bot_name')}"`;
     case 'create_bot':
-      return `create a new Bot called "${String(args.name || '').trim()}"`;
+      return `create a new Bot called "${text('name')}"`;
     case 'update_bot':
-      return `update the Bot "${String(args.bot_name || '').trim()}"`;
+      return `update the Bot "${text('bot_name')}"`;
     case 'delete_bot':
-      return `delete the Bot "${String(args.bot_name || '').trim()}"`;
+      return `delete the Bot "${text('bot_name')}"`;
     case 'set_bot_tools':
-      return `set which tools "${String(args.bot_name || '').trim()}" may use`;
-    case 'connect_plugin':
-      return `connect the "${String(args.plugin_slug || '').trim()}" plugin`;
+      return `set which tools "${text('bot_name')}" may use`;
     case 'disconnect_plugin':
-      return `disconnect the "${String(args.plugin_slug || '').trim()}" plugin`;
+      return `disconnect the "${text('plugin_slug')}" plugin`;
+    case 'invite_team_member':
+      return `invite ${text('email')} to the team`;
+    case 'publish_team_bot':
+      return `publish "${text('bot_name')}" to the team`;
+    case 'create_group_chat':
+      return `start the chat "${text('title')}"`;
     default:
       return toolName;
   }
@@ -167,7 +167,7 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     toolSpecs.push({
       name: DELEGATE_TOOL,
       description:
-        'Assign a subtask to one of your specialist Bots and get its answer back. Use the exact bot name from your team roster.',
+        'Assign a subtask to one of your specialist Bots and get its answer back.',
       parameters: {
         type: 'object',
         properties: {
@@ -202,7 +202,8 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
           isChief: b.id === bot.id || isChiefOfStaffBot(b),
           tools: toolNamesByBot.get(b.id) ?? [],
         })),
-        await describeServices(userId)
+        await describeServices(userId),
+        bot.systemPrompt
       )
     : undefined;
 
@@ -210,7 +211,7 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     // --- Workspace management (Chief only) ---
     // These run immediately: the user asked the Chief to do this work, so
     // making them re-approve every step would defeat the point.
-    if (isWorkspaceTool(toolName)) {
+    if (policy.canManage && isWorkspaceTool(toolName)) {
       const outcome = await executeWorkspaceTool(toolName, args, { userId, botName: bot.name });
       return {
         kind: 'result',
@@ -252,36 +253,27 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
       });
 
       if (sub.error) {
-        // Tell the delegating bot to answer the user itself rather than retry
-        // the hand-off, which is what causes a stalled multi-round loop.
-        const isMissingLlm = sub.error.kind === 'not_configured';
         return {
           kind: 'result',
           ok: false,
           result: {
             from: specialist.name,
+            error_kind: sub.error.kind,
             error: `${specialist.name} could not complete this: ${sub.error.message}`,
-            // A specialist with no LLM is not a dead end for the delegating
-            // bot: if the Chief holds the tools itself it should use them
-            // rather than reporting a blocker the user has to go and fix.
-            next_step: isMissingLlm
-              ? `${specialist.name} has no LLM configured to reason with. If you have a tool of your own that does this work, call it directly now instead of delegating again. Only if you have no such tool, tell the user exactly which setting to change and stop.`
-              : 'Do not delegate this again. Answer the user with what you know, and say plainly that this part could not be completed and why.',
+            tools_run: sub.tools.map((tool) => ({ tool: tool.toolName, status: tool.status })),
           },
         };
       }
 
       if (sub.waitingForApproval) {
-        // The specialist is parked on an approval card. Do not report a void
-        // answer - tell the delegating bot the work is paused.
+        const pending = sub.tools.find((tool) => tool.status === 'needs_approval');
         return {
           kind: 'result',
           ok: true,
           result: {
             from: specialist.name,
-            answer: `${specialist.name} paused to request the user's approval before finishing this.`,
             status: 'waiting_for_user_approval',
-            next_step: 'Stop here. Tell the user the work is waiting on their approval and what it is waiting for.',
+            pending_action: pending?.actionName ?? pending?.toolName ?? null,
           },
         };
       }
@@ -292,8 +284,6 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
         result: {
           from: specialist.name,
           answer: sub.text,
-          // Nudge the delegating bot to wrap up with this result.
-          next_step: 'Use the result above to answer the user now. Do not delegate the same work again.',
         },
       };
     }
@@ -330,20 +320,12 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     };
   };
 
-  const accounts = new Set(
-    toolSpecs
-      .map((tool) => (tool.name.includes('.') ? tool.name.slice(0, tool.name.indexOf('.')) : ''))
-      .filter(Boolean)
-  );
   const slackApp = await findSlackAppByBotId(bot.id);
-  const accountLine = accounts.size > 0
-    ? `Accounts this bot can use right now: ${[...accounts].join(', ')}. Use them for whatever was asked. Do not say one of these is disconnected.`
-    : 'No plugin tools are enabled for this bot on this turn. Do not invent live account data.';
-  const slackInstall = slackApp?.status === 'connected' && !accounts.has('slack')
+  const serviceAccess = await describeServiceAccess(userId, toolSpecs);
+  const slackInstall = slackApp?.status === 'connected' && !toolSpecs.some((tool) => tool.name.startsWith('slack.'))
     ? `This bot is installed in Slack as itself (@${bot.name}).`
     : '';
 
-  const ticket = ticketWorkHint(messageContent, history, bot.jiraProject);
   const turn = await runBotTurn({
     bot,
     userName,
@@ -352,13 +334,11 @@ export async function runBotTurnWithTools(options: RunTurnOptions): Promise<Turn
     tools: toolSpecs,
     executor,
     overrideSystemPrompt: systemPrompt,
-    contextIssueKeys: ticket.keys,
     systemAddendum: [
       options.systemAddendum,
       describeWorkDesk(bot),
-      accountLine,
+      serviceAccess,
       slackInstall,
-      ticket.hint,
     ]
       .filter(Boolean)
       .join('\n\n'),

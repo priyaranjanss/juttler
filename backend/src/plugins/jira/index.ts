@@ -1,5 +1,5 @@
 /**
- * Jira plugin — ticket agent over the connected Atlassian site.
+ * Jira plugin over the connected Atlassian site.
  */
 
 import { PluginModule } from '../types';
@@ -8,7 +8,15 @@ import { jiraTools } from './tools';
 const issueKeyParam = {
   type: 'string' as const,
   description:
-    'Issue key (ABC-123). Aliases: key / issue / ticket. A bare number is OK when the bot has a preferred project.',
+    'Full issue key, such as ABC-123.',
+};
+
+const issueFieldParams = {
+  priority: { type: 'string', description: 'Priority name, e.g. High' },
+  labels: { type: 'string', description: 'Comma-separated labels; replaces the current labels' },
+  due_date: { type: 'string', description: 'Due date as YYYY-MM-DD' },
+  parent: { type: 'string', description: 'Parent issue key, for a subtask or a child of an epic' },
+  assignee: { type: 'string', description: 'Assignee name, email, or account id' },
 };
 
 export const jiraPlugin: PluginModule = {
@@ -16,7 +24,7 @@ export const jiraPlugin: PluginModule = {
     slug: 'jira',
     name: 'Jira',
     description:
-      'Do ticket work end-to-end: search, read, create, update, comment, assign, and change status.',
+      'Search, read, create, update, link, comment on, assign, and change the status of Jira issues.',
     category: 'Project management',
     isOfficial: true,
     authType: 'oauth',
@@ -31,7 +39,7 @@ export const jiraPlugin: PluginModule = {
       {
         name: 'search_tickets',
         description:
-          'Search with JQL when you do not already know the issue key. Returns verified issue keys, summaries, statuses, and links. For "list/show/count tickets" requests, use this result directly and never guess issue keys. If the user supplied one exact key, use get_ticket instead.',
+          'Search issues with JQL. Returns issue keys, summaries, statuses, assignees, and links, plus the total match count.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -39,7 +47,7 @@ export const jiraPlugin: PluginModule = {
             jql: {
               type: 'string',
               description:
-                'JQL, a bare issue key, or empty for recent issues in the preferred project.',
+                'JQL query. Empty lists recently updated issues, in the bot\'s configured project when it has one.',
             },
             max_results: { type: 'number', description: 'How many issues to return' },
           },
@@ -49,7 +57,7 @@ export const jiraPlugin: PluginModule = {
       {
         name: 'get_ticket',
         description:
-          'Read one issue by key (summary, description, comments). Prefer this whenever a key is known — including short follow-ups that refer to a ticket in the thread.',
+          'Read one issue by key, including its summary, description, and comments.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -59,25 +67,26 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'create_ticket',
-        description: 'Create an issue. Project defaults to the bot preferred project when omitted.',
+        description: 'Create an issue. Project defaults to the bot\'s configured project when omitted.',
         sensitive: false,
         parameters: {
           type: 'object',
           properties: {
             project: {
               type: 'string',
-              description: 'Project key. Omit when the bot has a preferred Jira project.',
+              description: 'Project key',
             },
             summary: { type: 'string', description: 'Issue summary' },
-            issue_type: { type: 'string', description: 'Task, Bug, Story, …' },
+            issue_type: { type: 'string', description: 'Issue type name from the project (get_project lists them); default Task' },
             description: { type: 'string', description: 'Description' },
+            ...issueFieldParams,
           },
           required: ['summary'],
         },
       },
       {
         name: 'update_ticket',
-        description: 'Update summary and/or description on an issue.',
+        description: 'Update an issue: summary, description, priority, labels, due date, parent, or assignee. Only the fields passed change.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -85,8 +94,44 @@ export const jiraPlugin: PluginModule = {
             issue_key: issueKeyParam,
             summary: { type: 'string', description: 'New summary' },
             description: { type: 'string', description: 'New description' },
+            ...issueFieldParams,
           },
           required: ['issue_key'],
+        },
+      },
+      {
+        name: 'get_project',
+        description: 'Read a project: its issue types, lead, and components. Defaults to the bot\'s configured project.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: { project: { type: 'string', description: 'Project key' } },
+          required: [],
+        },
+      },
+      {
+        name: 'find_users',
+        description: 'Find Jira users by name or email.',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: { query: { type: 'string', description: 'Name or email to search for' } },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'link_tickets',
+        description:
+          'Link two issues. The phrase reads "issue_key <link_type> other_issue_key", e.g. "ABC-1 blocks ABC-2" or "ABC-1 relates to ABC-3".',
+        sensitive: false,
+        parameters: {
+          type: 'object',
+          properties: {
+            issue_key: issueKeyParam,
+            link_type: { type: 'string', description: 'Link name or phrase, e.g. "blocks", "is blocked by", "relates to", "duplicates"' },
+            other_issue_key: { type: 'string', description: 'Full key of the other issue' },
+          },
+          required: ['issue_key', 'link_type', 'other_issue_key'],
         },
       },
       {
@@ -101,7 +146,7 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'change_status',
-        description: 'Move an issue through its workflow by transition or target status name.',
+        description: 'Move an issue through its workflow by transition id, transition name, or target status name.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -114,7 +159,7 @@ export const jiraPlugin: PluginModule = {
       },
       {
         name: 'add_comment',
-        description: 'Comment on an issue (e.g. drop a PR link).',
+        description: 'Add a comment to an issue.',
         sensitive: false,
         parameters: {
           type: 'object',

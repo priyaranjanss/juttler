@@ -18,6 +18,11 @@ export const AI_PROVIDERS = {
   free_endpoint: {
     label: 'Free Model Endpoint',
     endpoint: 'https://allaitools-generate.freemodels.workers.dev/api/chat',
+    // Sent as `modelId`; the endpoint silently falls back to its default for unknown ids.
+    // `model` makes the tool calls; `reasoningModel` plans, reviews and writes replies
+    // because it reasons better but emits malformed tool calls.
+    model: 'sol',
+    reasoningModel: 'claude-sonnet-5',
   },
 } as const;
 

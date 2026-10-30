@@ -115,6 +115,89 @@ function formatSlackError(code: string | undefined): string {
   }
 }
 
+type SlackContext = { credential: Record<string, any> };
+
+/** Follows Slack's cursor pagination for a list method, up to a page budget. */
+async function listAll(ctx: SlackContext, method: string, key: string, params: Record<string, string | number>): Promise<any[]> {
+  const items: any[] = [];
+  let cursor = '';
+  for (let page = 0; page < 5; page++) {
+    const data = await slackCall(ctx, method, { ...params, limit: 200, ...(cursor ? { cursor } : {}) });
+    items.push(...(data[key] ?? []));
+    cursor = data.response_metadata?.next_cursor || '';
+    if (!cursor) break;
+  }
+  return items;
+}
+
+function listMembers(ctx: SlackContext): Promise<any[]> {
+  return listAll(ctx, 'users.list', 'members', {});
+}
+
+function memberName(member: any): string {
+  return member.profile?.display_name || member.real_name || member.name || member.id;
+}
+
+/**
+ * Accepts a channel id, a #name, a DM id, or a person (user id, @handle, or
+ * name), and returns the conversation id Slack expects. A person resolves to
+ * the DM with them; when no DM exists yet, the user id itself, which
+ * chat.postMessage accepts.
+ */
+async function resolveChannel(ctx: SlackContext, raw: unknown): Promise<string> {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new Error('A Slack channel is required: a channel ID, #name, or a person.');
+  }
+  const value = raw.trim().replace(/^[#@]/, '');
+  if (/^[CGD][A-Z0-9]{6,}$/.test(value)) return value;
+
+  const conversations = await listAll(ctx, 'conversations.list', 'channels', {
+    types: 'public_channel,private_channel,mpim,im',
+    exclude_archived: 'true',
+  });
+  const wanted = value.toLowerCase();
+  const channel = conversations.find((c: any) => typeof c.name === 'string' && c.name.toLowerCase() === wanted);
+  if (channel) return channel.id;
+
+  let userId = /^[UW][A-Z0-9]{6,}$/.test(value) ? value : '';
+  if (!userId) {
+    const members = (await listMembers(ctx)).filter((m: any) => !m.deleted);
+    const person = members.find((m: any) =>
+      [m.name, m.real_name, m.profile?.display_name, m.profile?.real_name]
+        .filter(Boolean)
+        .some((name: string) => name.toLowerCase() === wanted)
+    );
+    userId = person?.id ?? '';
+  }
+  if (userId) {
+    const dm = conversations.find((c: any) => c.is_im && c.user === userId);
+    return dm?.id ?? userId;
+  }
+
+  throw new Error(`No channel or person named "${raw}" is visible to this Slack account.`);
+}
+
+/** Message fields shared by every read, with the author's name alongside their id. */
+async function messageViews(ctx: SlackContext, messages: any[]) {
+  const names = new Map<string, string>();
+  if (messages.some((m) => m.user)) {
+    try {
+      for (const member of await listMembers(ctx)) names.set(member.id, memberName(member));
+    } catch {
+      // Names are a convenience; the ids are still returned.
+    }
+  }
+  return messages.map((m: any) => ({
+    user: m.user,
+    user_name: m.user ? names.get(m.user) ?? null : m.username ?? null,
+    text: m.text,
+    ts: m.ts,
+    thread_ts: m.thread_ts,
+    reply_count: m.reply_count,
+    datetime: m.ts ? new Date(Number(m.ts) * 1000).toISOString() : undefined,
+  }));
+}
+
 export const slackTools: Record<string, ToolExecutor> = {
   /** List the channels, DMs and group DMs the user can see. */
   list_channels: async (args, ctx) => {
@@ -144,18 +227,52 @@ export const slackTools: Record<string, ToolExecutor> = {
 
   /** Read recent messages from a channel or DM. */
   read_messages: async (args, ctx) => {
-    const channel = requiredString(args, 'channel').replace(/^#/, '');
+    const channel = await resolveChannel(ctx, args.channel);
     const limit = optionalNumber(args, 'limit', 20, 100);
     const data = await slackCall(ctx, 'conversations.history', { channel, limit }, {});
 
     return {
       channel,
       total: data.messages?.length ?? 0,
-      messages: (data.messages ?? []).map((m: any) => ({
-        user: m.user,
-        text: m.text,
-        ts: m.ts,
-        datetime: m.ts ? new Date(Number(m.ts) * 1000).toISOString() : undefined,
+      messages: await messageViews(ctx, data.messages ?? []),
+    };
+  },
+
+  /** Read a message and every reply in its thread. */
+  read_thread: async (args, ctx) => {
+    const channel = await resolveChannel(ctx, args.channel);
+    const ts = requiredString(args, 'thread_ts');
+    const limit = optionalNumber(args, 'limit', 50, 200);
+    const data = await slackCall(ctx, 'conversations.replies', { channel, ts, limit }, {});
+    return {
+      channel,
+      thread_ts: ts,
+      total: data.messages?.length ?? 0,
+      messages: await messageViews(ctx, data.messages ?? []),
+    };
+  },
+
+  /** People in the workspace, optionally filtered by name. */
+  list_users: async (args, ctx) => {
+    const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+    const limit = optionalNumber(args, 'limit', 50, 500);
+    const members = (await listMembers(ctx)).filter((m: any) => !m.deleted && m.id !== 'USLACKBOT');
+    const matches = query
+      ? members.filter((m: any) =>
+          [m.name, m.real_name, m.profile?.display_name, m.profile?.title]
+            .filter(Boolean)
+            .some((field: string) => field.toLowerCase().includes(query))
+        )
+      : members;
+    return {
+      total: matches.length,
+      users: matches.slice(0, limit).map((m: any) => ({
+        id: m.id,
+        name: memberName(m),
+        handle: m.name,
+        title: m.profile?.title || null,
+        is_bot: Boolean(m.is_bot),
+        timezone: m.tz ?? null,
       })),
     };
   },
@@ -185,16 +302,13 @@ export const slackTools: Record<string, ToolExecutor> = {
    * to the real person, and the legacy app-level override is not needed.
    */
   send_message: async (args, ctx) => {
-    const channelValue = args.channel ?? args.channel_id;
-    if (typeof channelValue !== 'string' || !channelValue.trim()) {
-      throw new Error('A Slack channel is required. Provide channel as a channel ID or #name.');
-    }
-    const channel = channelValue.trim().replace(/^#/, '');
+    const channel = await resolveChannel(ctx, args.channel ?? args.channel_id);
     const text = requiredString(args, 'text');
+    const threadTs = typeof args.thread_ts === 'string' && args.thread_ts.trim() ? args.thread_ts.trim() : undefined;
 
     const data = await slackCall(ctx, 'chat.postMessage', {}, {
       method: 'POST',
-      body: { channel, text },
+      body: { channel, text, ...(threadTs ? { thread_ts: threadTs } : {}) },
     });
 
     return {
@@ -202,6 +316,24 @@ export const slackTools: Record<string, ToolExecutor> = {
       channel: data.channel ?? channel,
       text: data.message?.text ?? text,
       ts: data.ts,
+      ...(threadTs ? { thread_ts: threadTs } : {}),
     };
+  },
+
+  /** Edit a message the connected user posted. */
+  update_message: async (args, ctx) => {
+    const channel = await resolveChannel(ctx, args.channel);
+    const ts = requiredString(args, 'ts');
+    const text = requiredString(args, 'text');
+    const data = await slackCall(ctx, 'chat.update', {}, { method: 'POST', body: { channel, ts, text } });
+    return { updated: true, channel: data.channel ?? channel, ts: data.ts ?? ts, text: data.text ?? text };
+  },
+
+  /** Delete a message the connected user posted. */
+  delete_message: async (args, ctx) => {
+    const channel = await resolveChannel(ctx, args.channel);
+    const ts = requiredString(args, 'ts');
+    await slackCall(ctx, 'chat.delete', {}, { method: 'POST', body: { channel, ts } });
+    return { deleted: true, channel, ts };
   },
 };

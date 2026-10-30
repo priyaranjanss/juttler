@@ -15,7 +15,7 @@ export const gmailPlugin: PluginModule = {
       {
         name: 'list_emails',
         description:
-          'Search this mailbox and return matching messages (subject, sender, date, unread, snippet), newest first. Works for any question about mail: the latest message, everything unread, mail from a person, this week, attachments, sent items, and so on. Gmail search operators are passed through ("from:x@y.com", "newer_than:7d", "has:attachment"); plain requests like "my inbox" or "unread mail" are mapped for you.',
+          'Search this mailbox with a Gmail search query and return matching messages (subject, sender, date, unread, snippet), newest first.',
         sensitive: false,
         parameters: {
           type: 'object',
@@ -23,17 +23,17 @@ export const gmailPlugin: PluginModule = {
             query: {
               type: 'string',
               description:
-                'What to search for, or which mailbox to look in. Optional - omit it to read the inbox. Examples: "is:unread", "from:boss@corp.com", "newer_than:7d", "in:sent", "has:attachment". Plain English like "unread mail" is also accepted.',
+                'Gmail search query using Gmail search operators, e.g. "is:unread", "from:boss@corp.com", "newer_than:7d", "in:sent". Omitted means the inbox.',
             },
             max_results: {
               type: 'number',
               description:
-                'How many messages to return (max 15). Keep this small - each result costs a separate Gmail request, and large values trigger Google rate limits. 3 to 5 is plenty for most questions.',
+                'How many messages to return (default 5, max 15). Each result costs a separate Gmail request and large values can hit Google rate limits.',
             },
             include_body: {
               type: 'boolean',
               description:
-                'Also read the text of the newest few messages. Use this when the user wants the content read or summarised, not just headers. At most 3 bodies are fetched per call.',
+                'Also return the body text of the newest messages (at most 3 per call), not just headers.',
             },
           },
         },

@@ -6,8 +6,7 @@ import {
   extractEmbeddedToolCalls,
   stripEmbeddedToolMarkup,
 } from './embeddedToolCalls';
-import { isPlausibleRepoPath, resolvePathArg, sanitizeToolArgs } from './toolArgSanitize';
-import { resolveIssueKey } from '../plugins/jira/keys';
+import { sanitizeToolArgs } from './toolArgSanitize';
 
 // Every bot must have its own explicit model and key. Never fall back to a
 // workspace credential: that would make bots share both identity and billing.
@@ -26,6 +25,8 @@ export interface LlmWiring {
   endpoint: string;
   apiKey: string;
   model: string;
+  /** Plans, reviews and writes replies while `model` makes the tool calls; the user sees one bot. */
+  reasoningModel?: string;
 }
 
 export type LlmGap = 'ok' | 'no_key' | 'no_model' | 'no_key_or_model';
@@ -52,7 +53,8 @@ export function resolveLlmWiring(bot: Bot): LlmWiring | null {
       provider: 'free_endpoint',
       endpoint: AI_PROVIDERS.free_endpoint.endpoint,
       apiKey: '',
-      model: '',
+      model: AI_PROVIDERS.free_endpoint.model,
+      reasoningModel: AI_PROVIDERS.free_endpoint.reasoningModel,
     };
   }
 
@@ -130,43 +132,45 @@ type ChatMessage = {
   tool_call_id?: string;
 };
 
-// A tool-calling turn, so the model can chain tools and read their output.
-// A single turn may need several steps in sequence: enable a tool, delegate to a
-// specialist, then answer. Five rounds runs out mid-flow and leaves the user
-// with an error instead of a reply, so keep this generous; rounds now stop early
-// on their own when a round gains nothing useful.
+// The model selects tools automatically and receives their results between calls.
+// These limits bound a turn; exhausted turns still receive a model-generated reply.
 const MAX_TOOL_ROUNDS = 18;
 /** Hard wall so long agent turns still return a finish/blocker before the client gives up. */
 const TURN_BUDGET_MS = 170_000;
 const MAX_GATEWAY_ATTEMPTS = 3;
 const MAX_CONTEXT_ITEM_CHARS = 8_000;
-/** Default cap for tool JSON in the model context. File reads get a higher cap. */
-const MAX_TOOL_RESULT_CHARS = 3_500;
-const MAX_FILE_RESULT_CHARS = 16_000;
-const EXPLORE_TOOLS = new Set([
-  'github.list_files',
-  'github.list_tree',
-  'github.list_commits',
-  'github.list_prs',
-  'github.list_branches',
-  'jira.search_tickets',
-  'jira.list_projects',
-  'jira.list_transitions',
-]);
-const ACT_TOOLS = new Set([
-  'github.write_file',
-  'github.edit_file',
-  'github.delete_file',
-  'github.create_branch',
-  'github.create_pull_request',
-  'github.comment_pr',
-  'github.create_issue',
-  'jira.create_ticket',
-  'jira.update_ticket',
-  'jira.change_status',
-  'jira.add_comment',
-  'jira.assign_ticket',
-]);
+const MAX_TOOL_RESULT_CHARS = 16_000;
+
+const PLAN_PROMPT =
+  'Before acting, think this request through: the outcome the user wants, what you can find out or decide yourself, ' +
+  'and the steps and tool calls that get there, in order. Reply with only that plan in a few short lines. ' +
+  'Do not call tools, report results, or write the reply to the user yet.';
+
+/** Marks a review that hands remaining tool work back instead of replying. */
+const CONTINUE_MARKER = /(?:^|\n)\W*CONTINUE\W*:\s*/i;
+
+function selfReviewPrompt(events: ToolEvent[], handBackWork: boolean): string {
+  const remainingWork = handBackWork
+    ? 'If work within your tools remains, reply with only a line starting "CONTINUE:" that says what to do next; it is carried out with tool calls before anything is sent.'
+    : 'If work within your tools remains, do it now with tool calls.';
+  const ledger = events.length
+    ? events.map((event) => `- ${event.toolName} ${truncateForModel(event.args, 300)}: ${event.status}`).join('\n')
+    : '- none';
+  return (
+    'Check your draft reply above before it is sent. Compare it with the user\'s latest request and the tool results in this conversation. ' +
+    'A draft that describes steps you intend to take is a plan, not a result. ' +
+    'A draft that asks the user for something you could find out with your tools or decide with reasonable judgement is not a result either. ' +
+    `${remainingWork} ` +
+    'Finding out what the request needs is remaining work; changes the user did not ask for are not, so recommend them in a sentence instead of making them. ' +
+    'End the reply with the result, not with questions or offers; ask only for what only the user can give. ' +
+    'If the requested outcome is complete and every action or result the draft reports is confirmed by a tool result, respond with the final reply for the user. ' +
+    'The user has not seen the draft: the reply is the whole message they will read, so do not refer to the draft or to having already answered. ' +
+    'If it cannot be done, or needs information or approval only the user can give, respond with what was done, what was not, and why. ' +
+    'The list below is every tool call made this turn; an action that is not on it as a success did not happen, so the reply must not report it as done. ' +
+    'Every fact the reply states (errors, causes, numbers, names) must appear in a tool result or the supplied context; leave out or correct anything that does not, and say what could not be found out.' +
+    `\n\nTool calls this turn:\n${ledger}`
+  );
+}
 
 function stringifyContext(value: unknown): string {
   if (typeof value === 'string') return value;
@@ -193,157 +197,29 @@ function stripLeakedContext(text: string): string {
 
 function truncateForModel(value: unknown, max = MAX_TOOL_RESULT_CHARS): string {
   const text = stringifyContext(value);
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  if (text.length <= max) return text;
+  const half = Math.floor((max - 32) / 2);
+  return `${text.slice(0, half)}…[truncated ${text.length - half * 2} characters]…${text.slice(-half)}`;
 }
 
-/** Tool results for the model — keep get_file as valid JSON with usable content. */
-function formatToolResultForModel(toolName: string, result: unknown): string {
-  if (toolName === 'github.get_file' && result && typeof result === 'object') {
-    const row = result as Record<string, any>;
-    if (typeof row.content === 'string') {
-      const overhead = JSON.stringify({
-        path: row.path,
-        type: row.type,
-        size: row.size,
-        sha: row.sha,
-        truncated: true,
-        content: '',
-      }).length;
-      const budget = Math.max(2_000, MAX_FILE_RESULT_CHARS - overhead);
-      const cut = row.content.length > budget;
-      return JSON.stringify({
-        path: row.path,
-        type: row.type ?? 'file',
-        size: row.size,
-        sha: row.sha ?? null,
-        truncated: Boolean(row.truncated) || cut,
-        content: cut ? row.content.slice(0, budget) : row.content,
-      });
-    }
-  }
-  return truncateForModel(result ?? {}, toolResultBudget(toolName));
+function formatToolResultForModel(result: unknown): string {
+  return truncateForModel(result ?? {});
 }
 
-/** Short notes for the model when forcing a final answer (not shown raw to users). */
+/** Compact, tool-agnostic outcome context for a final model response. */
 function summarizeToolEvents(events: ToolEvent[]): string {
   if (events.length === 0) return 'No tools ran.';
   return events
     .map((event) => {
-      if (event.status === 'failed' || event.status === 'unavailable') {
-        return `- ${event.toolName}: failed — ${event.error || 'error'}`;
-      }
-      if (event.status === 'needs_approval') {
-        return `- ${event.toolName}: waiting for approval`;
-      }
-      const highlight = highlightToolResult(event.toolName, event.result);
-      return highlight ? `- ${event.toolName}: ok — ${highlight}` : `- ${event.toolName}: ok`;
+      const outcome =
+        event.status === 'failed' || event.status === 'unavailable'
+          ? { status: event.status, error: event.error }
+          : event.status === 'needs_approval'
+            ? { status: event.status, action: event.actionName, reason: event.reason }
+            : { status: event.status, result: event.result };
+      return `- ${event.toolName}: ${truncateForModel(outcome, 2_000)}`;
     })
     .join('\n');
-}
-
-/** Pull useful fields so fallbacks / forced finals still carry real substance. */
-function highlightToolResult(toolName: string, result: unknown): string {
-  if (!result || typeof result !== 'object') return '';
-  const row = result as Record<string, any>;
-
-  // Keep a short excerpt for the model digest — never dump whole files into user chat.
-  if (toolName === 'github.get_file' && typeof row.content === 'string') {
-    const body = row.content.length > 1_200 ? `${row.content.slice(0, 1_200)}…` : row.content;
-    return `${row.path || 'file'} (${row.size ?? body.length} bytes): ${body.replace(/\s+/g, ' ').slice(0, 400)}`;
-  }
-  if (toolName === 'github.search_code' && Array.isArray(row.results)) {
-    return row.results
-      .slice(0, 12)
-      .map((hit: any) => {
-        const frag = hit.matches?.[0]?.fragment;
-        return frag ? `${hit.path}: ${String(frag).slice(0, 240)}` : String(hit.path || '');
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-
-  const bits: string[] = [];
-  if (row.key) bits.push(String(row.key));
-  if (row.summary) bits.push(String(row.summary));
-  if (row.description && typeof row.description === 'string') {
-    bits.push(row.description.length > 400 ? `${row.description.slice(0, 400)}…` : row.description);
-  }
-  if (row.status) bits.push(`status ${row.status}`);
-  if (row.transition || row.to) bits.push(`→ ${row.to || row.transition}`);
-  if (row.branch) bits.push(`branch ${row.branch}`);
-  if (row.html_url || row.url || row.pr_url) bits.push(String(row.html_url || row.url || row.pr_url));
-  if (row.path && toolName !== 'github.get_file') bits.push(String(row.path));
-  if (typeof row.returned === 'number') bits.push(`${row.returned} rows`);
-  if (Array.isArray(row.entries)) bits.push(`${row.entries.length} entries`);
-  if (row.error) bits.push(String(row.error));
-  if (bits.length === 0 && toolName) return truncateForModel(result, 160);
-  return bits.join(' · ');
-}
-
-function toolResultBudget(toolName: string): number {
-  if (
-    toolName === 'github.get_file' ||
-    toolName === 'github.search_code' ||
-    toolName === 'github.list_tree' ||
-    toolName === 'jira.get_ticket'
-  ) {
-    return MAX_FILE_RESULT_CHARS;
-  }
-  return MAX_TOOL_RESULT_CHARS;
-}
-
-/** Short line for Slack/UI when the model fails to write a real reply. */
-function shortUserHighlight(toolName: string, result: unknown): string {
-  if (!result || typeof result !== 'object') return toolName;
-  const row = result as Record<string, any>;
-  if (toolName === 'github.get_file' && row.path) {
-    return `Read ${row.path}${typeof row.size === 'number' ? ` (${row.size} bytes)` : ''}`;
-  }
-  if (row.key && row.summary) return `${row.key}: ${row.summary}`;
-  if (row.html_url || row.url || row.pr_url) return String(row.html_url || row.url || row.pr_url);
-  if (row.branch) return `Branch ${row.branch}`;
-  if (row.path) return String(row.path);
-  if (Array.isArray(row.entries)) return `Listed ${row.entries.length} paths`;
-  return toolName;
-}
-
-/**
- * Last-resort user reply — never a Progress / tool inventory dump.
- * Prefer a single outcome line from successful mutations, else a short blocker.
- */
-function userFacingOutcome(events: ToolEvent[]): string {
-  if (events.length === 0) return 'I could not complete that.';
-
-  if (events.some((e) => e.status === 'needs_approval')) {
-    return 'I need your approval in Juttler before I can finish that action.';
-  }
-
-  const wins = events.filter((e) => e.status === 'success' && ACT_TOOLS.has(e.toolName));
-  if (wins.length > 0) {
-    const lines = wins.map((e) => shortUserHighlight(e.toolName, e.result)).slice(0, 4);
-    return `Done. ${lines.join(' · ')}`;
-  }
-
-  const fail = events.find((e) => {
-    if (e.status !== 'failed' && e.status !== 'unavailable') return false;
-    // Path mistakes are recoverable — don't surface them as the final answer.
-    if (isPathArgError(e.error)) return false;
-    return true;
-  });
-  if (fail) {
-    const err = (fail.error || 'failed').replace(/\s+/g, ' ').trim().slice(0, 220);
-    return `Blocked on ${fail.toolName}: ${err}`;
-  }
-
-  if (turnHasReads(events) && !turnHasAction(events)) {
-    return 'I stopped before applying the change (no write/PR yet). Say continue and I will finish from the files already read.';
-  }
-
-  if (turnHasReads(events)) {
-    return 'I gathered context but could not finish cleanly. Say continue and I will pick up where I left off.';
-  }
-
-  return 'I could not finish that yet. Say continue and I will try again.';
 }
 
 function contentLooksLikeToolCallDump(text: string): boolean {
@@ -405,30 +281,22 @@ function isStuckOnSameFailure(events: ToolEvent[]): boolean {
   return last.every((e) => `${e.toolName}::${(e.error || '').slice(0, 160)}` === key);
 }
 
-/** Always leave the user with a finish line or a clear blocker — never an empty turn. */
+/** Keep model output separate from execution errors; do not synthesize user-facing replies. */
 function ensureTurnReply(
   text: string | undefined,
   events: ToolEvent[],
   error?: TurnResult['error']
 ): TurnResult {
   const trimmed = text?.trim();
-  if (
-    trimmed &&
-    !contentLooksLikeToolCallDump(trimmed) &&
-    !/^here is what i got so far:/i.test(trimmed) &&
-    !/^progress:/i.test(trimmed)
-  ) {
+  if (trimmed && !contentLooksLikeToolCallDump(trimmed)) {
     return { text: trimmed, tools: events, waitingForApproval: false, error };
-  }
-  if (events.length > 0) {
-    return { text: userFacingOutcome(events), tools: events, waitingForApproval: false };
   }
   return {
     tools: events,
     waitingForApproval: false,
     error: error ?? {
       kind: 'bad_response',
-      message: 'No answer was produced. Try rephrasing the request.',
+      message: 'The model did not return a usable response.',
     },
   };
 }
@@ -437,15 +305,30 @@ function buildToolCapabilityContext(tools: BotToolSpec[]): string {
   const availableTools = tools
     .map((tool) => `- ${tool.name}: ${tool.description}`)
     .join('\n');
-  const jiraGuidance = tools.some((tool) => tool.name.startsWith('jira.'))
-    ? '\nFor Jira: when asked to count or list tickets, call jira.search_tickets and answer from its returned total and issues. Never invent or guess issue keys. Call jira.get_ticket only for an exact key supplied by the user or returned by search.'
-    : '';
-
   return `\n\nAuthoritative tool access for this bot in this turn:
 ${
   availableTools || '- No external tools are currently enabled and connected for this bot.'
 }
-The list above is every tool this bot can use on this turn, for any request. Call whichever tools the request needs, in whatever order, and answer from their results. Do not say a plugin is disconnected when its tools are listed. If a tool returns an error, report that error.${jiraGuidance}`;
+The list above is every tool this bot can use on this turn.`;
+}
+
+/** Each tool's argument names, types, and meanings, for endpoints that take no tool schemas. */
+function describeToolArguments(tools: BotToolSpec[]): string {
+  return tools
+    .map((tool) => {
+      const properties = Object.entries<{ type?: string; description?: string; enum?: string[] }>(
+        tool.parameters?.properties ?? {}
+      );
+      if (properties.length === 0) return `- ${tool.name}: no arguments`;
+      const required = new Set(tool.parameters?.required ?? []);
+      const args = properties.map(([name, schema]) => {
+        const options = schema.enum?.length ? ` one of ${schema.enum.join('|')}` : '';
+        const description = schema.description ? ` - ${schema.description}` : '';
+        return `${name} (${schema.type}${options}${required.has(name) ? ', required' : ''})${description}`;
+      });
+      return `- ${tool.name}: ${args.join('; ')}`;
+    })
+    .join('\n');
 }
 
 function buildSystemPrompt(bot: Bot, userName: string, tools: BotToolSpec[]): string {
@@ -453,7 +336,7 @@ function buildSystemPrompt(bot: Bot, userName: string, tools: BotToolSpec[]): st
 }
 
 function buildBotIdentityInstructions(bot: Bot): string {
-  return `Authoritative bot identity: You are ${bot.name}, serving as ${bot.roleTitle}. Speak in this bot's configured persona and describe this bot's responsibilities when asked. Do not identify yourself as the underlying AI model, model vendor, or a different assistant. If asked which model you are, say you are ${bot.name} and that the underlying model is not specified.`;
+  return `Authoritative bot identity: You are ${bot.name}, serving as ${bot.roleTitle}. Be transparent that you are an AI assistant; do not claim to be human.`;
 }
 
 function buildInitialMessages(
@@ -466,7 +349,7 @@ function buildInitialMessages(
   systemAddendum?: string
 ): ChatMessage[] {
   const base = overrideSystemPrompt
-    ? `${overrideSystemPrompt}${buildToolCapabilityContext(tools)}`
+    ? `${overrideSystemPrompt}\n\n${AUTONOMY_RULES}${buildToolCapabilityContext(tools)}`
     : buildSystemPrompt(bot, userName, tools);
   const messages: ChatMessage[] = [
     {
@@ -479,15 +362,39 @@ function buildInitialMessages(
     },
   ];
 
-  for (const m of history.slice(-20)) {
+  const recent = history.slice(-20);
+  const resultsByCallId = new Map(
+    recent
+      .filter((m) => m.type === 'tool_result' && m.metadata?.toolResult?.callId)
+      .map((m) => [m.metadata!.toolResult!.callId, m.metadata!.toolResult!])
+  );
+  const pairedResults = new Set<string>();
+
+  for (const m of recent) {
     if (m.type === 'text') {
-      // Prior Progress dumps teach the model to dump tools — skip them.
-      if (/^here is what i got so far:/i.test(m.content.trim()) || /^progress:/i.test(m.content.trim())) {
-        continue;
-      }
       const content =
         m.content.length > 2_000 ? `${m.content.slice(0, 2_000)}…` : m.content;
       messages.push({ role: m.senderType === 'user' ? 'user' : 'assistant', content });
+      continue;
+    }
+
+    // An earlier call and its result keep the same call/result shape as calls made in this turn.
+    const paired = m.type === 'tool_call' && m.metadata?.toolCall
+      ? resultsByCallId.get(m.metadata.toolCall.callId)
+      : undefined;
+    if (m.type === 'tool_call' && m.metadata?.toolCall && paired) {
+      const { toolName, args, callId } = m.metadata.toolCall;
+      pairedResults.add(callId);
+      messages.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: callId, type: 'function', function: { name: toolName, arguments: JSON.stringify(args ?? {}) } }],
+      });
+      messages.push({
+        role: 'tool',
+        tool_call_id: callId,
+        content: truncateForModel({ status: paired.status, result: paired.result }, MAX_CONTEXT_ITEM_CHARS),
+      });
       continue;
     }
 
@@ -500,6 +407,10 @@ function buildInitialMessages(
           ? `${content.slice(0, MAX_CONTEXT_ITEM_CHARS)} [truncated]`
           : content,
       });
+      continue;
+    }
+
+    if (m.type === 'tool_result' && m.metadata?.toolResult && pairedResults.has(m.metadata.toolResult.callId)) {
       continue;
     }
 
@@ -524,170 +435,15 @@ function buildInitialMessages(
   return messages;
 }
 
-function toolChoiceFor(
-  tools: BotToolSpec[],
-  forceTools = false
-): 'auto' | 'required' {
-  if (tools.length === 0) return 'auto';
-  if (forceTools) return 'required';
-  return 'auto';
-}
-
-function turnHasAction(events: ToolEvent[]): boolean {
-  return events.some((event) => event.status === 'success' && ACT_TOOLS.has(event.toolName));
-}
-
-function turnHasReads(events: ToolEvent[]): boolean {
-  return events.some(
-    (event) =>
-      event.status === 'success' &&
-      (event.toolName === 'github.get_file' ||
-        event.toolName === 'github.search_code' ||
-        event.toolName === 'jira.get_ticket')
+/** Rejects a call that omits a required argument, naming what the tool accepts. */
+function assertRequiredArgs(spec: BotToolSpec | undefined, args: Record<string, any>): void {
+  const required: string[] = Array.isArray(spec?.parameters?.required) ? spec!.parameters.required : [];
+  const missing = required.filter((key) => args[key] == null);
+  if (missing.length === 0) return;
+  const accepted = Object.keys(spec?.parameters?.properties ?? {});
+  throw new Error(
+    `Missing required argument(s): ${missing.join(', ')}. Arguments this tool accepts: ${accepted.join(', ') || 'none'}.`
   );
-}
-
-const CHANGE_VERBS =
-  /\b(fix|implement|write|create|update|change|add|remove|delete|refactor|patch|ship|build|code|pr\b|pull request|commit|resolve|close|transition|assign|do the|finish|complete|handle|do it|do now|do this|do that|go ahead|continue|retry|again)\b/i;
-
-const PURE_QUESTION =
-  /^(what|what's|whats|who|where|when|why|how|which|show|explain|summarize|summarise|describe|list|find|look)\b/i;
-
-const SHORT_FOLLOW_UP =
-  /^(do(\s+(it|now|that|this))?|go(\s+ahead)?|yes|yep|yeah|please|continue|retry|again|fix(\s+it)?|ship(\s+it)?|ok|okay)[.!]*$/i;
-
-function priorUserWantedWork(history: Message[]): boolean {
-  for (const m of [...history].reverse().slice(0, 12)) {
-    if (m.type !== 'text' || m.senderType !== 'user') continue;
-    const text = m.content.trim();
-    if (!text) continue;
-    if (CHANGE_VERBS.test(text) || /\b[A-Za-z][A-Za-z0-9]+-\d+\b/.test(text)) return true;
-  }
-  return false;
-}
-
-/** True when the user wants changes applied, not just an explanation of existing code/tickets. */
-function userAskedForChanges(message: string, history: Message[] = []): boolean {
-  const text = message.trim();
-  if (!text) return priorUserWantedWork(history);
-  if (/^(hi|hey|hello|thanks|thank you|ok|okay|yo|sup|good morning|good night)[!.?\s]*$/i.test(text)) {
-    return false;
-  }
-  if (SHORT_FOLLOW_UP.test(text)) return true;
-  // Bare ticket number ("9" / "#9" / "ticket 9") is work, not a question.
-  if (/^(?:ticket|issue|bug|#)?\s*#?\d{1,5}$/i.test(text)) return true;
-  if (/\b[A-Za-z][A-Za-z0-9]+-\d+\b/.test(text) && !PURE_QUESTION.test(text)) return true;
-  if (PURE_QUESTION.test(text) && !CHANGE_VERBS.test(text)) return false;
-  if (CHANGE_VERBS.test(text)) return true;
-  // Short Slack nudges inherit open work from the thread.
-  if (text.length <= 40 && priorUserWantedWork(history)) return true;
-  return text.length > 12;
-}
-
-/** Reads/failed reads without a write/PR/Jira mutation — keep the loop going. */
-function needsActionAfterReads(events: ToolEvent[], message: string, history: Message[] = []): boolean {
-  if (turnHasAction(events)) return false;
-  if (!userAskedForChanges(message, history)) return false;
-  if (turnHasReads(events)) return true;
-  // Failed get_file / search still means we should retry and finish, not dump Progress.
-  return events.some(
-    (e) =>
-      (e.status === 'failed' || e.status === 'success') &&
-      (e.toolName.startsWith('github.') || e.toolName.startsWith('jira.'))
-  );
-}
-
-/** Model wrote a plan / asked permission instead of calling write tools. */
-function isAskingPermissionToAct(text: string): boolean {
-  return /\b(if you('d| would)? like|shall i|should i|want me to|let me know if|happy to (implement|proceed|fix)|i can (implement|fix|proceed|make)|would you like me to|can implement those|i can implement|say continue|stopped before (applying|writing)|no write\/?pr yet)\b/i.test(
-    text
-  );
-}
-
-function isPathArgError(message: string | undefined): boolean {
-  return /missing or invalid ["']?path|missing required parameter ["']path/i.test(message || '');
-}
-
-/** Paths discovered earlier this turn — used to repair get_file/write_file without a path. */
-function recentKnownPaths(events: ToolEvent[]): string[] {
-  const paths: string[] = [];
-  const seen = new Set<string>();
-  const push = (raw: unknown) => {
-    if (typeof raw !== 'string') return;
-    const path = raw.trim();
-    if (!isPlausibleRepoPath(path) || seen.has(path)) return;
-    seen.add(path);
-    paths.push(path);
-  };
-
-  for (const event of events) {
-    if (event.status !== 'success' || !event.result || typeof event.result !== 'object') continue;
-    const row = event.result as Record<string, any>;
-    push(row.path);
-    if (Array.isArray(row.results)) {
-      for (const hit of row.results.slice(0, 20)) push(hit?.path);
-    }
-    if (Array.isArray(row.entries)) {
-      for (const entry of row.entries.slice(0, 40)) {
-        if (entry?.type === 'file' || entry?.type === 'blob' || !entry?.type) push(entry?.path);
-      }
-    }
-  }
-  return paths;
-}
-
-/** When the model omits path, reuse a unique path already found this turn. */
-function fillMissingGithubPath(toolName: string, args: Record<string, any>, events: ToolEvent[]): void {
-  if (
-    toolName !== 'github.get_file' &&
-    toolName !== 'github.write_file' &&
-    toolName !== 'github.edit_file' &&
-    toolName !== 'github.delete_file'
-  ) {
-    return;
-  }
-  if (resolvePathArg(args)) return;
-  const known = recentKnownPaths(events);
-  if (known.length === 1) {
-    args.path = known[0];
-  }
-}
-
-const JIRA_KEY_TOOLS = new Set([
-  'jira.get_ticket',
-  'jira.update_ticket',
-  'jira.list_transitions',
-  'jira.change_status',
-  'jira.add_comment',
-  'jira.assign_ticket',
-]);
-
-/**
- * When the model passes an empty/junk issue_key (or omits it), fill from the
- * thread context so "continue" / "ICS-9" / "9" still hit the right ticket.
- */
-function fillMissingIssueKey(
-  toolName: string,
-  args: Record<string, any>,
-  contextKeys: string[],
-  preferredProject: string | null | undefined
-): void {
-  if (!toolName.startsWith('jira.')) return;
-  if (preferredProject) args._preferredProject = preferredProject;
-
-  const primary = contextKeys[0] ?? null;
-  if (primary) args._contextIssueKey = primary;
-
-  if (!JIRA_KEY_TOOLS.has(toolName) && toolName !== 'jira.search_tickets') return;
-
-  const resolved = resolveIssueKey(args.issue_key ?? args.key ?? args.issue ?? args.ticket, preferredProject);
-  if (resolved) {
-    args.issue_key = resolved;
-    return;
-  }
-  if (primary && JIRA_KEY_TOOLS.has(toolName)) {
-    args.issue_key = primary;
-  }
 }
 
 function toOpenAiTools(tools: BotToolSpec[]) {
@@ -745,18 +501,39 @@ const FREE_ENDPOINT_HEADERS = {
   Accept: '*/*',
 };
 
+/**
+ * This endpoint has no system role and weighs the latest turn far above an
+ * opening message, so the turn's context travels with the latest user-role
+ * message instead of sitting before the whole history.
+ */
 function toFreeEndpointMessages(
   messages: ChatMessage[]
-): Array<{ role: 'system' | 'user' | 'assistant'; content: string }> {
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const context = messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content || '')
+    .filter(Boolean)
+    .join('\n\n');
+  const converted = toFreeEndpointTurns(messages.filter((message) => message.role !== 'system'));
+
+  if (!context) return converted;
+  const latestUser = converted.map((message) => message.role).lastIndexOf('user');
+  if (latestUser === -1 || latestUser !== converted.length - 1) {
+    return [...converted, { role: 'user', content: `Context for this turn:\n${context}` }];
+  }
+  const target = converted[latestUser];
+  converted[latestUser] = {
+    role: 'user',
+    content: `Context for this turn:\n${context}\n\n---\nLatest message:\n${target.content}`,
+  };
+  return converted;
+}
+
+function toFreeEndpointTurns(
+  messages: ChatMessage[]
+): Array<{ role: 'user' | 'assistant'; content: string }> {
   const toolNames = new Map<string, string>();
   return messages.map((message) => {
-    if (message.role === 'system') {
-      return {
-        role: 'user',
-        content: `Instructions for this bot. Follow these while answering the user's messages:\n${message.content || ''}`,
-      };
-    }
-
     if (message.role === 'tool') {
       const toolName = toolNames.get(message.tool_call_id || '') || 'tool';
       return {
@@ -771,18 +548,22 @@ function toFreeEndpointMessages(
         role: 'assistant',
         content: [
           message.content,
-          `Tools called internally: ${message.tool_calls.map((call) => call.function.name).join(', ')}`,
+          ...message.tool_calls.map(
+            (call) => `<tool_call>{"name":${JSON.stringify(call.function.name)},"arguments":${call.function.arguments || '{}'}}</tool_call>`
+          ),
         ]
           .filter(Boolean)
           .join('\n'),
       };
     }
 
-    return { role: message.role, content: message.content || '' };
+    return { role: message.role === 'assistant' ? 'assistant' : 'user', content: message.content || '' };
   });
 }
 
 interface CompletionRequestOptions {
+  /** Overrides `wiring.model` for this request. */
+  model?: string;
   maxTokens: number;
   temperature: number;
   tools?: BotToolSpec[];
@@ -801,6 +582,9 @@ async function fetchCompletion(
       headers: FREE_ENDPOINT_HEADERS,
       body: JSON.stringify({
         messages: toFreeEndpointMessages(messages),
+        modelId: options.model ?? wiring.model,
+        thinking: false,
+        deepSearch: false,
         stream: false,
       }),
     });
@@ -880,6 +664,24 @@ async function readCompletionResponse(response: Response): Promise<ChatCompletio
   throw new Error('Endpoint returned an unsupported response format.');
 }
 
+/** The reasoning model's plan for this turn, or undefined; the turn proceeds without one. */
+async function planTurn(wiring: LlmWiring, model: string, messages: ChatMessage[]): Promise<string | undefined> {
+  try {
+    const res = await fetchCompletion(wiring, [...messages, { role: 'system', content: PLAN_PROMPT }], {
+      model,
+      maxTokens: 800,
+      temperature: 0.2,
+    });
+    if (!res.ok) return undefined;
+    const data = await readCompletionResponse(res);
+    const content = data.choices?.[0]?.message?.content;
+    const plan = stripLeakedContext(stripEmbeddedToolMarkup(typeof content === 'string' ? content : '')).trim();
+    return plan || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Runs one bot turn against its configured gateway, executing any tools the
  * model asks for through `executor` (the Tool Gateway).
@@ -897,13 +699,10 @@ export async function runBotTurn(params: {
   overrideSystemPrompt?: string;
   /** Extra instructions appended for a specific channel, such as a Slack reply. */
   systemAddendum?: string;
-  /** Issue keys resolved from this message + thread (ICS-9, bare "9", continue). */
-  contextIssueKeys?: string[];
   /** Grok-style reasoning mode: think / big_brain / off. */
   reasoningMode?: ReasoningMode;
 }): Promise<TurnResult> {
   const { bot, tools, executor } = params;
-  const contextIssueKeys = params.contextIssueKeys ?? [];
 
   // Every bot reasons with its own LLM configuration. Tool credentials remain
   // independent in the Tool Gateway, but a turn needs a model to request tools.
@@ -936,7 +735,8 @@ export async function runBotTurn(params: {
     : `${wiring.endpoint.replace(/\/+$/, '')}/chat/completions`;
   const freeEndpointToolInstructions =
     usesFreeEndpoint && tools.length > 0
-      ? 'This endpoint does not support structured function calls. When you need a tool, emit exactly one block in this format: <tool_call>{"name":"EXACT_TOOL_NAME","arguments":{"argument":"value"}}</tool_call>. Use only the exact tool names listed above, and wait for the tool result before continuing.'
+      ? 'This endpoint does not support structured function calls. When you need a tool, emit exactly one block in this format: <tool_call>{"name":"EXACT_TOOL_NAME","arguments":{"argument":"value"}}</tool_call>. Use only the exact tool names listed above, and wait for the tool result before continuing.\n\n' +
+        `Arguments each tool accepts:\n${describeToolArguments(tools)}`
       : '';
   const messages = buildInitialMessages(
     bot,
@@ -953,16 +753,15 @@ export async function runBotTurn(params: {
   // same one stops the tool loop instead of burning every round.
   const unavailableSeen = new Set<string>();
   let usage: TurnResult['tokenUsage'];
-  // Set when the tool loop should stop early and go straight to the final answer.
   let stopToolLoop = false;
-  let exploreStreak = 0;
-  let forceToolsNext = false;
   let emptyReplyRetries = 0;
-  let actionNudges = 0;
   let gatewayEmptyRetries = 0;
-  let pathRecoveryNudges = 0;
-  const wantsChanges = userAskedForChanges(params.messageContent, params.history);
+  let reviewedAtToolCount: number | null = null;
+  let lastDraft: string | undefined;
   const turnStartedAt = Date.now();
+  const reasoner = wiring.reasoningModel && wiring.reasoningModel !== model ? wiring.reasoningModel : undefined;
+  let reasonNext = false;
+  let reviewStart = 0;
 
   // Grok-style reasoning modes map to OpenAI-compatible reasoning_effort.
   // think = medium, big_brain = high, off = none. The gateway decides how
@@ -973,32 +772,40 @@ export async function runBotTurn(params: {
     reasoningMode === 'think' ? 'medium' : undefined;
 
   try {
+    if (reasoner && tools.length > 0) {
+      const plan = await planTurn(wiring, reasoner, messages);
+      if (plan) {
+        messages.push({
+          role: 'system',
+          content: `Your plan for this turn, worked out before acting (adjust it as tool results come in):\n${plan}`,
+        });
+      }
+    }
+
     for (let round = 0; round < MAX_TOOL_ROUNDS && !stopToolLoop; round++) {
       // Leave headroom for the forced final answer before the client/proxy gives up.
       if (Date.now() - turnStartedAt > TURN_BUDGET_MS) {
         messages.push({
           role: 'system',
-          content:
-            'Time budget reached. Stop calling tools. Summarize what you finished and the exact blocker if anything remains.',
+          content: 'The available time for tool execution has elapsed. Stop tool calls for this turn.',
         });
         stopToolLoop = true;
         break;
       }
 
       if (isStuckOnSameFailure(collected)) {
-        messages.push({
-          role: 'system',
-          content:
-            'The same tool failed repeatedly. Stop retrying it. Tell the user the concrete blocker and what they can do next.',
-        });
         stopToolLoop = true;
         break;
       }
 
+      const reasoningRound = Boolean(reasoner) && (tools.length === 0 || reasonNext);
+      reasonNext = false;
+
       const res = usesFreeEndpoint
         ? await fetchCompletion(wiring, messages, {
+            model: reasoningRound ? reasoner : undefined,
             tools,
-            toolChoice: toolChoiceFor(tools, forceToolsNext),
+            toolChoice: 'auto',
             reasoningEffort,
             maxTokens: tools.length > 0 ? 8192 : 2048,
             temperature: tools.length > 0 ? 0.2 : 0.7,
@@ -1015,19 +822,17 @@ export async function runBotTurn(params: {
           ...(tools.length > 0
             ? {
                 tools: toOpenAiTools(tools),
-                tool_choice: toolChoiceFor(tools, forceToolsNext),
+                tool_choice: 'auto',
               }
             : {}),
           // Grok-style reasoning: think = medium, big_brain = high, off = none.
           // The gateway maps this to its own reasoning budget.
           ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-          // write_file payloads need headroom; low caps yield empty / truncated tool calls.
+          // Tool arguments can contain full content payloads, so allow room for complete calls.
           max_tokens: tools.length > 0 ? 8192 : 2048,
           temperature: tools.length > 0 ? 0.2 : 0.7,
         }),
       });
-      forceToolsNext = false;
-
       if (!res.ok) {
         let detail = '';
         try {
@@ -1065,10 +870,8 @@ export async function runBotTurn(params: {
           gatewayEmptyRetries += 1;
           messages.push({
             role: 'system',
-            content:
-              'The previous model response was empty. Continue the user request with the next tool call now. Prefer get_ticket for named issue keys, then GitHub write tools to finish.',
+            content: 'The previous response was empty. Continue the conversation based on the request and available context.',
           });
-          forceToolsNext = tools.length > 0;
           continue;
         }
         if (collected.length > 0) {
@@ -1078,7 +881,7 @@ export async function runBotTurn(params: {
         return {
           ...ensureTurnReply(undefined, collected, {
             kind: 'bad_response',
-            message: 'Gateway returned no content.',
+            message: 'The model returned no content.',
           }),
           tokenUsage: usage,
         };
@@ -1106,11 +909,8 @@ export async function runBotTurn(params: {
       ) {
         messages.push({
           role: 'system',
-          content:
-            'Your previous response was cut off. Call the next tool again with complete, valid JSON arguments. ' +
-            'For file paths use a clean repo-relative path with no braces or quotes around it.',
+          content: 'The previous tool request was incomplete. Retry it with complete, valid arguments.',
         });
-        forceToolsNext = true;
         continue;
       }
 
@@ -1118,18 +918,13 @@ export async function runBotTurn(params: {
       if (toolCalls.length === 0) {
         const text = stripLeakedContext(stripEmbeddedToolMarkup(rawContent));
         const canContinue = tools.length > 0 && round < MAX_TOOL_ROUNDS - 1;
-        const needsMoreWork = needsActionAfterReads(collected, params.messageContent, params.history);
 
-        // Empty model output after tools: retry instead of dumping raw progress.
         if (!text.trim()) {
           if (canContinue && collected.length > 0 && emptyReplyRetries < 4) {
             emptyReplyRetries += 1;
-            forceToolsNext = needsMoreWork || collected.length > 0;
             messages.push({
               role: 'system',
-              content: needsMoreWork
-                ? 'Your last message was empty. Continue with tools: edit_file / write_file / create_pull_request (or Jira update tools). Do not stop after only reading.'
-                : 'Your last message was empty. Call the next tool needed to finish, or if done write a short plain-language answer with no tool dumps.',
+              content: 'The previous response was empty. Continue or conclude based on the request and results so far.',
             });
             continue;
           }
@@ -1137,44 +932,46 @@ export async function runBotTurn(params: {
             stopToolLoop = true;
             break;
           }
+          if (lastDraft) return { ...ensureTurnReply(lastDraft, collected), tokenUsage: usage };
           return {
             ...ensureTurnReply(undefined, collected, {
               kind: 'bad_response',
-              message: 'Gateway returned no content.',
+              message: 'The model returned no content.',
             }),
             tokenUsage: usage,
           };
         }
 
-        // Change requests: never accept a chat reply until a write/PR/Jira mutation lands,
-        // or we are out of rounds (then the forced final answer reports finish vs blocker).
-        // Thread ticket keys ("continue" / "ICS-9" / "9") count even before any tool ran.
-        const unfinishedChange =
-          wantsChanges &&
-          !turnHasAction(collected) &&
-          (needsMoreWork || collected.length > 0 || contextIssueKeys.length > 0);
-        if (canContinue && unfinishedChange) {
-          actionNudges += 1;
-          const ticketHint = contextIssueKeys[0]
-            ? ` If you still need the ticket, call jira.get_ticket with issue_key=${contextIssueKeys[0]}.`
-            : '';
-          messages.push({ role: 'assistant', content: text });
-          messages.push({
-            role: 'system',
-            content: isAskingPermissionToAct(text)
-              ? `Do not ask for permission. Call edit_file (or write_file), then create_pull_request now.${ticketHint}`
-              : 'That reply is premature. Finish with tools first: get_ticket (if needed) → get_file → edit_file/write_file → create_pull_request. ' +
-                `Only then summarize. Never post Progress lists.${ticketHint}`,
-          });
-          forceToolsNext = true;
-          if (actionNudges >= 8) {
+        const handBack = reasoningRound && tools.length > 0 ? CONTINUE_MARKER.exec(text) : null;
+        if (handBack) {
+          if (!canContinue) {
             stopToolLoop = true;
             break;
           }
+          const next = text.slice(handBack.index + handBack[0].length).trim();
+          // The draft was never sent; keeping it would let its unverified claims carry forward.
+          messages.splice(reviewStart);
+          messages.push({
+            role: 'system',
+            content: `Your review found more to do before replying: ${next || 'finish the remaining work.'}`,
+          });
           continue;
         }
 
-        return ensureTurnReply(text, collected);
+        // A draft is final only after the model has checked it against the request
+        // and this turn's tool results; new tool activity since the last check needs another.
+        const needsReview = canContinue && (reviewedAtToolCount === null || collected.length > reviewedAtToolCount);
+        if (needsReview) {
+          reviewedAtToolCount = collected.length;
+          lastDraft = text;
+          reviewStart = messages.length;
+          messages.push({ role: 'assistant', content: text });
+          messages.push({ role: 'system', content: selfReviewPrompt(collected, Boolean(reasoner)) });
+          reasonNext = Boolean(reasoner);
+          continue;
+        }
+
+        return { ...ensureTurnReply(text, collected), tokenUsage: usage };
       }
 
       // The model wants to act: record its request, then execute through the gateway.
@@ -1190,7 +987,6 @@ export async function runBotTurn(params: {
         })),
       });
 
-      let roundHadPathFailure = false;
       for (const call of toolCalls) {
         let args: Record<string, any>;
         try {
@@ -1200,8 +996,7 @@ export async function runBotTurn(params: {
           }
           args = parsed as Record<string, any>;
           sanitizeToolArgs(call.function.name, args);
-          fillMissingGithubPath(call.function.name, args, collected);
-          fillMissingIssueKey(call.function.name, args, contextIssueKeys, bot.jiraProject);
+          assertRequiredArgs(tools.find((tool) => tool.name === call.function.name), args);
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'Invalid JSON arguments.';
           const detail = `The model returned invalid arguments for ${call.function.name}: ${reason}`;
@@ -1236,7 +1031,7 @@ export async function runBotTurn(params: {
           messages.push({
             role: 'tool',
             tool_call_id: call.id,
-            content: 'Waiting for the user to approve this action.',
+            content: JSON.stringify({ status: 'needs_approval', action: execution.actionName, reason: execution.reason }),
           });
           return { tools: collected, tokenUsage: usage, waitingForApproval: true };
         }
@@ -1250,23 +1045,23 @@ export async function runBotTurn(params: {
           }
           unavailableSeen.add(call.function.name);
 
-          const label =
+          const unavailable =
             execution.kind === 'missing'
-              ? `The ${execution.pluginSlug} plugin is not connected. Ask the user to connect it in the Plugins panel.`
-              : `The ${execution.toolName} tool is disabled for this bot. Ask the user to enable it in bot settings.`;
+              ? { status: 'unavailable', plugin: execution.pluginSlug }
+              : { status: 'disabled', tool: execution.toolName };
           collected.push({
             callId: call.id,
             toolName: call.function.name,
             args,
             status: 'unavailable',
-            error: label,
+            error: JSON.stringify(unavailable),
             // Lets the UI show a real "Connect this service" card
             missingPluginSlug: execution.kind === 'missing' ? execution.pluginSlug : undefined,
           });
           messages.push({
             role: 'tool',
             tool_call_id: call.id,
-            content: `${label} Answer the user with what you can do instead of asking for this tool again.`,
+            content: JSON.stringify(unavailable),
           });
           continue;
         }
@@ -1281,153 +1076,33 @@ export async function runBotTurn(params: {
           durationMs: execution.durationMs,
         });
 
-        if (execution.ok && ACT_TOOLS.has(call.function.name)) exploreStreak = 0;
-        else if (execution.ok && EXPLORE_TOOLS.has(call.function.name)) exploreStreak += 1;
-
-        const failMessage = execution.ok
-          ? ''
-          : String((execution.result as any)?.error ?? execution.result ?? 'Tool failed');
-        let toolContent = formatToolResultForModel(call.function.name, execution.result);
-
-        if (!execution.ok && isPathArgError(failMessage)) {
-          roundHadPathFailure = true;
-          const known = recentKnownPaths(collected);
-          toolContent =
-            `${failMessage}\n` +
-            'Do not stop. Call github.search_code or github.list_tree to discover real paths, ' +
-            'then call github.get_file with path set to one exact path string from those results.' +
-            (known.length
-              ? `\nPaths already known this turn (pick one): ${known.slice(0, 12).join(', ')}`
-              : '');
-        } else if (!execution.ok) {
-          toolContent +=
-            '\nRetry with corrected arguments if needed (paths must be clean repo-relative paths, no braces). ' +
-            'Then continue until the user request is finished.';
-        } else {
-          toolContent +=
-            '\nIf this does not finish the user request, call the next tool before you reply. Do not post Progress lists.';
-        }
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: toolContent,
+          content: formatToolResultForModel(execution.result),
         });
       }
 
-      // Recover from missing/invalid path instead of ending the turn on that error.
-      if (
-        !stopToolLoop &&
-        roundHadPathFailure &&
-        pathRecoveryNudges < 4 &&
-        round < MAX_TOOL_ROUNDS - 1
-      ) {
-        pathRecoveryNudges += 1;
-        const known = recentKnownPaths(collected);
-        messages.push({
-          role: 'system',
-          content: known.length
-            ? `Your last get_file/edit used a bad path. Call get_file again with path set to one of: ${known
-                .slice(0, 12)
-                .join(', ')}. Then edit_file / create_pull_request.`
-            : 'Your last get_file used a bad or missing path. Call github.search_code or github.list_tree now, then get_file with a real path. Do not reply yet.',
-        });
-        forceToolsNext = true;
-      }
-
-      // A round where every tool was unavailable or disabled gained nothing.
-      // Asking for more tools will not fix it, so go to the final answer.
-      const gainedNothing = collected.length > 0 && collected.every((e) => e.status === 'unavailable');
-      if (gainedNothing) {
-        stopToolLoop = true;
-      }
-
-      // Too much directory browsing without acting — push the model to finish.
-      // Reading file contents does not count; that is real developer work.
-      if (!stopToolLoop && exploreStreak >= 6) {
-        messages.push({
-          role: 'system',
-          content:
-            'You have listed enough paths. get_file the ones you need, then edit_file / write_file and create_pull_request. Do not claim you cannot see code if get_file already returned content.',
-        });
-        exploreStreak = 0;
-        forceToolsNext = true;
-      }
-
-      // After reading code for a change request, push for write/branch/PR before chat.
-      if (
-        !stopToolLoop &&
-        wantsChanges &&
-        turnHasReads(collected) &&
-        !turnHasAction(collected) &&
-        actionNudges < 5 &&
-        round < MAX_TOOL_ROUNDS - 1
-      ) {
-        actionNudges += 1;
-        messages.push({
-          role: 'system',
-          content:
-            'You have file/ticket context. Apply the change now with github.edit_file (preferred) or write_file, then create_pull_request. Do not reply until that succeeds or a tool truly blocks you.',
-        });
-        forceToolsNext = true;
-      }
     }
 
-    // Ran out of tool rounds â€” say so rather than looping forever
-    // ---------------------------------------------------------------------
-    // Forced final answer.
-    //
-    // Reaching here means the tool loop stopped early: the rounds ran out, a
-    // tool was unavailable, or a whole round gained nothing. In every case the
-    // model still owes the user an answer, so ask for one with tools removed -
-    // it can no longer defer by calling another tool. This is what stops a turn
-    // from dying as "stopped after N tool rounds".
-    // ---------------------------------------------------------------------
-    const toolDigest = summarizeToolEvents(collected)
-      .split('\n')
-      .map((line) => (line.length > 280 ? `${line.slice(0, 280)}…` : line))
-      .join('\n');
-    // Compact code excerpts only — full dumps make the final call return empty.
-    const recentReads = collected
-      .filter(
-        (event) =>
-          event.status === 'success' &&
-          (event.toolName === 'github.get_file' || event.toolName === 'jira.get_ticket')
-      )
-      .slice(-3)
-      .map((event) => {
-        const row = event.result as Record<string, any> | undefined;
-        if (!row) return '';
-        if (event.toolName === 'github.get_file' && typeof row.content === 'string') {
-          const body = row.content.length > 2_500 ? `${row.content.slice(0, 2_500)}…` : row.content;
-          return `${row.path}:\n${body}`;
-        }
-        if (event.toolName === 'jira.get_ticket') {
-          return `${row.key || ''}: ${row.summary || ''} — ${String(row.description || '').slice(0, 800)}`;
-        }
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n\n');
+    // Let the model summarize the observed outcomes when tool execution ends.
+    const toolDigest = summarizeToolEvents(collected);
     const slimHistory = messages.filter((m) => m.role === 'system' || m.role === 'user').slice(0, 4);
-    const unfinished = wantsChanges && !turnHasAction(collected);
     const finalMessages: ChatMessage[] = [
       ...slimHistory,
       {
         role: 'system',
         content:
-          'You cannot call any more tools. Write a clear short reply for the user. ' +
-          'No JSON, no XML, no code dumps, no "Progress:" lists. ' +
-          (unfinished
-            ? 'The change was not fully applied. Say exactly what you completed and the single blocker that stopped you. Tell them to say continue if they want you to resume.\n\n'
-            : 'Say what changed (or what blocked you) in plain language.\n\n') +
-          `Outcomes:\n${toolDigest}` +
-          (recentReads ? `\n\nKey excerpts you already read:\n${recentReads}` : ''),
+          'No more tools can be called in this turn. Respond to the user using the observed outcomes below. ' +
+          'Be accurate about what completed and what remains unresolved; do not claim unverified results.\n\n' +
+          `Tool outcomes:\n${toolDigest}`,
       },
       { role: 'user', content: params.messageContent },
     ];
 
     const finalRes = usesFreeEndpoint
       ? await fetchCompletion(wiring, finalMessages, {
+          model: reasoner,
           maxTokens: 1500,
           temperature: 0.3,
           reasoningEffort,
@@ -1478,7 +1153,11 @@ export async function runBotTurn(params: {
     const finalText = stripLeakedContext(stripEmbeddedToolMarkup(finalData.choices?.[0]?.message?.content ?? ''));
     const safeFinal =
       finalText.trim() && !contentLooksLikeToolMarkup(finalText) ? finalText : undefined;
-    return { ...ensureTurnReply(safeFinal, collected), tokenUsage: usage, reasoningMode };
+    return {
+      ...ensureTurnReply(safeFinal, collected),
+      tokenUsage: usage,
+      reasoningMode,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -1512,7 +1191,7 @@ export async function verifyAiConfig(
           provider,
           endpoint: AI_PROVIDERS.free_endpoint.endpoint,
           apiKey: '',
-          model: '',
+          model: AI_PROVIDERS.free_endpoint.model,
         },
         [{ role: 'user', content: 'ping' }],
         { maxTokens: 1, temperature: 0 }

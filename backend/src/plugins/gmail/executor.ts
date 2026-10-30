@@ -129,89 +129,17 @@ function encodeMime(to: string, subject: string, body: string): string {
     .replace(/=+$/, '');
 }
 
-/** Gmail search operators the user might type as plain English. */
-const NATURAL_QUERY_ALIASES: Record<string, string> = {
-  '': 'in:inbox',
-  'all': 'in:anywhere',
-  'all mail': 'in:anywhere',
-  'all mails': 'in:anywhere',
-  'everything': 'in:anywhere',
-  'mail': 'in:inbox',
-  'mails': 'in:inbox',
-  'mail in inbox': 'in:inbox',
-  'mails in inbox': 'in:inbox',
-  'emails': 'in:inbox',
-  'email': 'in:inbox',
-  'emails in inbox': 'in:inbox',
-  'inbox': 'in:inbox',
-  'unread': 'is:unread',
-  'unread mail': 'is:unread',
-  'unread mails': 'is:unread',
-  'unread email': 'is:unread',
-  'unread emails': 'is:unread',
-  'unread in inbox': 'in:inbox is:unread',
-  'recent': 'in:inbox',
-  'recent mail': 'in:inbox',
-  'recent mails': 'in:inbox',
-  'latest': 'in:inbox',
-  'latest mail': 'in:inbox',
-  'latest mails': 'in:inbox',
-  'newest': 'in:inbox',
-  'sent': 'in:sent',
-  'sent mail': 'in:sent',
-  'sent mails': 'in:sent',
-  'sent items': 'in:sent',
-  'drafts': 'in:drafts',
-  'draft': 'in:drafts',
-  'spam': 'in:spam',
-  'trash': 'in:trash',
-  'bin': 'in:trash',
-  'starred': 'is:starred',
-  'important': 'is:important',
-  'attachments': 'has:attachment',
-  'attachment': 'has:attachment',
-};
-
-/** Strips filler so phrasings like "show me my unread mail" still resolve. */
-function normalizeKey(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[!.?,]/g, '')
-    .replace(/^(please\s+|can you\s+|show me\s+|get me\s+|give me\s+|show\s+|get\s+|list\s+|check\s+|read\s+|fetch\s+|find\s+|search\s+|look at\s+)/, '')
-    .replace(/\b(my|the|all|any|me)\b/g, ' ')
-    .replace(/\binbox\b/g, 'inbox')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * Turns whatever the model passed into a valid Gmail query. A missing or
- * conversational value is mapped to the sensible default rather than erroring,
- * so a plain "check my inbox" works without Gmail search syntax.
- */
+/** The model writes the Gmail query; an empty one reads the inbox. */
 function resolveQuery(raw: unknown): string {
-  if (typeof raw !== 'string') return 'in:inbox';
-  const value = raw.trim();
-  if (!value) return 'in:inbox';
-
-  const key = normalizeKey(value);
-  const alias = NATURAL_QUERY_ALIASES[key] ?? NATURAL_QUERY_ALIASES[value.toLowerCase()];
-  if (alias) return alias;
-
-  return value;
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  return value || 'in:inbox';
 }
 
 export const gmailTools: Record<string, ToolExecutor> = {
   /**
-   * Search the mailbox and return matching messages.
-   *
-   * The query is optional: plain requests like "check my inbox" or "my unread
-   * mail" are mapped to the right Gmail syntax, and any Gmail search operator is
-   * passed through when given ("from:x@y.com", "newer_than:7d", "has:attachment").
-   *
-   * Headers only by default. Pass include_body to also read the first few
-   * bodies, which turns "summarise my unread" into one call instead of one per
-   * message. Results are newest first.
+   * Search the mailbox with a Gmail query and return matching messages.
+   * Headers only by default; include_body also reads the first few bodies.
+   * Results are newest first.
    */
   list_emails: async (args, ctx) => {
     const query = resolveQuery(args.query);
@@ -264,8 +192,6 @@ export const gmailTools: Record<string, ToolExecutor> = {
         return entry;
       });
 
-      // Newest first, which is what "latest email" questions want and what every
-      // other read is best served by too.
       messages.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
 
       return { query, total: messages.length, messages };

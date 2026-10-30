@@ -132,7 +132,7 @@ describe('Jira OAuth client', () => {
     assert.ok(paths.some((path) => path.endsWith('/search')));
   });
 
-  it('explains that a Jira 404 key must be verified rather than guessed', async () => {
+  it('reports a Jira 404 as an issue that is missing or not visible', async () => {
     globalThis.fetch = (async () =>
       new Response('{}', { status: 404, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
     await assert.rejects(
@@ -141,7 +141,7 @@ describe('Jira OAuth client', () => {
           { credential: { token: 'access-token' }, metadata: { cloudId: 'cloud-id' } },
           'https://api.atlassian.com/ex/jira/cloud-id/rest/api/3/issue/ICS-1'
         ),
-      /ICS-1 was not found or is not visible.*exact key returned by Jira search/
+      /ICS-1 was not found or is not visible to the connected account/
     );
   });
 });

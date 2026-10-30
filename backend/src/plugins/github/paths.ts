@@ -133,10 +133,7 @@ export function resolvePathArg(args: Record<string, unknown>): string | null {
 export function requiredPath(args: Record<string, unknown>): string {
   const path = resolvePathArg(args) || sanitizeRepoPath(args.path);
   if (!path) {
-    throw new Error(
-      'Missing or invalid "path". Pass one repo-relative file path (e.g. src/app.ts). ' +
-        'Use search_code or list_tree first, then copy the exact path field — never prefix with : or punctuation.'
-    );
+    throw new Error('Missing or invalid "path": expected one repository-relative file path.');
   }
   return path;
 }

@@ -10,7 +10,7 @@
     "db:clean": "tsx db/clean.ts",
     "seed:admin": "tsx db/seed-admin.ts",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/services/slackTeam/decide.test.ts src/services/workScope.test.ts src/services/embeddedToolCalls.test.ts src/services/slackFormat.test.ts src/services/toolArgSanitize.test.ts src/services/issueKeys.test.ts src/plugins/jira/jql.test.ts src/plugins/jira/keys.test.ts src/plugins/jira/client.test.ts src/plugins/jira/tools.test.ts src/plugins/github/edit.test.ts src/plugins/github/paths.test.ts src/services/aiService.test.ts src/utils/authValidation.test.ts"
+    "test": "tsx --test src/services/slackTeam/decide.test.ts src/services/workScope.test.ts src/services/embeddedToolCalls.test.ts src/services/slackFormat.test.ts src/services/toolArgSanitize.test.ts src/plugins/jira/jql.test.ts src/plugins/jira/keys.test.ts src/plugins/jira/client.test.ts src/plugins/jira/tools.test.ts src/plugins/github/edit.test.ts src/plugins/github/paths.test.ts src/plugins/github/tools.test.ts src/services/aiService.test.ts src/utils/authValidation.test.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.77",
