@@ -1,196 +1,156 @@
 /**
- * Thin GitHub REST helpers shared by every coding tool.
- * No ticket-specific or repo-specific hardcoding.
+ * Repo-relative path + branch sanitization for GitHub tools.
+ *
+ * Models often emit junk prefixes (":", "}}", quotes, file://). Those must never
+ * reach the Contents API — that is what caused %3A… 404s.
  */
 
-import { requiredString, requestJson } from '../shared';
-import { sanitizeBranchName } from './paths';
-
-export function parseRepo(value: string): { owner: string; repo: string } {
-  const cleaned = String(value ?? '')
-    .trim()
-    .replace(/^repo:/i, '')
-    .replace(/^https?:\/\/github\.com\//i, '')
-    .replace(/^github\.com\//i, '')
-    .replace(/\.git$/i, '')
-    .replace(/[?#].*$/, '')
-    .replace(/\/$/, '');
-  const [owner, repo, ...rest] = cleaned.split('/');
-  if (!owner || !repo || rest.length > 0) {
-    throw new Error(`"${value}" is not a repository. Use owner/name, e.g. "octocat/Hello-World".`);
-  }
-  return { owner, repo };
+/** True when the string can be a real file/folder path in a git repo. */
+export function isPlausibleRepoPath(path: string): boolean {
+  const p = String(path ?? '').trim();
+  if (!p || p.length > 512) return false;
+  if (!/[A-Za-z0-9_]/.test(p)) return false;
+  if (p === '.' || p === '..') return false;
+  if (p.includes('://')) return false;
+  if (/(^|\/)\.\.(\/|$)/.test(p)) return false;
+  return true;
 }
 
-export function repoUrl(args: Record<string, any>, suffix = ''): string {
-  const { owner, repo } = parseRepo(requiredString(args, 'repo'));
-  return `https://api.github.com/repos/${owner}/${repo}${suffix}`;
-}
+/**
+ * Normalize a model-supplied path into a clean repo-relative path, or "".
+ * Never returns punctuation-only junk.
+ */
+export function sanitizeRepoPath(raw: unknown): string {
+  let path = String(raw ?? '').trim();
+  if (!path) return '';
 
-export function encodeRepoPath(path: string): string {
-  return path
-    .replace(/^\/+/, '')
-    .split('/')
-    .filter(Boolean)
-    .map((segment) => encodeURIComponent(segment))
-    .join('/');
-}
+  // URI / copy-paste leftovers
+  path = path.replace(/^file:\/\//i, '');
+  path = path.replace(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\/[^/]+\//i, '');
+  path = path.replace(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/\?path=/i, '');
+  path = path.replace(/^github\.com\/[^/]+\/[^/]+\/(?:blob|tree)\/[^/]+\//i, '');
 
-export function githubHeaders(ctx: { credential: Record<string, any> }): Record<string, string> {
-  if (!ctx.credential.token) {
-    throw new Error('GitHub needs an access token. Reconnect GitHub from Plugins and paste a new one.');
-  }
-  return {
-    Authorization: `Bearer ${ctx.credential.token}`,
-    'X-GitHub-Api-Version': '2022-11-28',
-    Accept: 'application/vnd.github+json',
-    'User-Agent': 'juttler-bot',
-  };
-}
+  // Common naming wrappers used by models in tool calls.
+  path = path.replace(/^repo:/i, '');
+  path = path.replace(/^path:/i, '');
 
-export async function resolveCommitSha(
-  args: Record<string, any>,
-  headers: Record<string, string>,
-  refName: string
-): Promise<string> {
-  const name = sanitizeBranchName(refName);
-  if (!name) throw new Error('ref is required.');
+  // Mustache / template leftovers
+  path = path.replace(/^(\{\{[^}]*\}\}|\{[^}]*\})+/, '');
 
-  try {
-    const ref = await requestJson(`${repoUrl(args, `/git/ref/heads/${encodeURIComponent(name)}`)}`, {
-      headers,
-    });
-    if (ref.object?.sha) return ref.object.sha as string;
-  } catch {
-    // try tag / commit
+  // Strip wrapping quotes / backticks / braces / colons (":backend/…" → %3A…)
+  for (let i = 0; i < 6; i++) {
+    const next = path
+      .replace(/^[\s`"'{\\}:]+/, '')
+      .replace(/[\s`"'{\\}]+$/, '')
+      .replace(/^}+/, '')
+      .replace(/^{+/, '')
+      .replace(/^:+/, '');
+    if (next === path) break;
+    path = next;
   }
 
-  try {
-    const ref = await requestJson(`${repoUrl(args, `/git/ref/tags/${encodeURIComponent(name)}`)}`, {
-      headers,
-    });
-    if (ref.object?.sha) {
-      if (ref.object.type === 'commit') return ref.object.sha as string;
-      try {
-        const tag = await requestJson(`${repoUrl(args, `/git/tags/${ref.object.sha}`)}`, { headers });
-        if (tag.object?.sha) return tag.object.sha as string;
-      } catch {
-        // lightweight tag
-      }
-      return ref.object.sha as string;
+  path = path.replace(/\\/g, '/').replace(/^\/+/, '');
+
+  // "a.ts, b.ts" or leading comma → first real segment
+  if (path.includes(',')) {
+    const parts = path
+      .split(',')
+      .map((part) =>
+        part
+          .trim()
+          .replace(/^[\s`"'{\\}:]+/, '')
+          .replace(/^\/+/, '')
+      )
+      .filter((part) => isPlausibleRepoPath(part));
+    path = parts[0] ?? '';
+  }
+
+  // Drop accidental "./"
+  path = path.replace(/^\.\//, '');
+
+  // Drop trailing GitHub URL query fragments after a path.
+  path = path.replace(/[?#].*$/, '');
+
+  return isPlausibleRepoPath(path) ? path : '';
+}
+
+/** Branch names: no spaces, no refs/heads/ prefix, no template junk. */
+export function sanitizeBranchName(raw: unknown): string {
+  let name = String(raw ?? '').trim();
+  name = name
+    .replace(/^[\s`"'{\\}]+|[\s`"'{\\}]+$/g, '')
+    .replace(/^refs\/heads\//i, '')
+    .replace(/\s+/g, '-')
+    .replace(/^:+/, '');
+  if (!name || name.length > 200) return '';
+  if (!/^[A-Za-z0-9._/-]+$/.test(name)) {
+    name = name.replace(/[^A-Za-z0-9._/-]+/g, '-').replace(/-+/g, '-');
+  }
+  return name.replace(/^\/+|\/+$/g, '');
+}
+
+const PATH_ALIASES = [
+  'path',
+  'file',
+  'file_path',
+  'filepath',
+  'filePath',
+  'filename',
+  'file_name',
+  'target',
+  'src',
+] as const;
+
+function coercePathValue(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) {
+    const cleaned = sanitizeRepoPath(value);
+    return cleaned || null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const cleaned = sanitizeRepoPath(String(value));
+    return cleaned || null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const cleaned = coercePathValue(item);
+      if (cleaned) return cleaned;
     }
-  } catch {
-    // try commit
+    return null;
   }
-
-  const commit = await requestJson(`${repoUrl(args, `/commits/${encodeURIComponent(name)}`)}`, {
-    headers,
-  });
-  const sha = commit.sha;
-  if (!sha) throw new Error(`Could not resolve "${refName}" to a commit.`);
-  return sha as string;
+  if (value && typeof value === 'object') {
+    const row = value as Record<string, unknown>;
+    for (const key of PATH_ALIASES) {
+      const cleaned = coercePathValue(row[key]);
+      if (cleaned) return cleaned;
+    }
+  }
+  return null;
 }
 
-function isAlreadyExists(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /\(422\)/.test(message) && /already exists|Reference already exists/i.test(message);
+/** Resolve path from path / file / file_path / … onto args.path. */
+export function resolvePathArg(args: Record<string, unknown>): string | null {
+  for (const key of PATH_ALIASES) {
+    const resolved = coercePathValue(args[key]);
+    if (resolved) {
+      args.path = resolved;
+      return resolved;
+    }
+  }
+  return null;
 }
 
-/** Ensure branch exists; create from default when missing. */
-export async function ensureBranch(
-  args: Record<string, any>,
-  headers: Record<string, string>,
-  branchName: string
-): Promise<{ branch: string; created: boolean }> {
-  const name = sanitizeBranchName(branchName);
-  if (!name) throw new Error('branch is required.');
-
-  try {
-    await resolveCommitSha(args, headers, name);
-    return { branch: name, created: false };
-  } catch {
-    // create below
+/** Required clean path or a clear error the model can fix. */
+export function requiredPath(args: Record<string, unknown>): string {
+  const path = resolvePathArg(args) || sanitizeRepoPath(args.path);
+  if (!path) {
+    throw new Error(
+      'Missing or invalid "path". Pass one repo-relative file path (e.g. src/app.ts). ' +
+        'Use search_code or list_tree first, then copy the exact path field — never prefix with : or punctuation.'
+    );
   }
-
-  const repoInfo = await requestJson(repoUrl(args), { headers });
-  const from = repoInfo.default_branch;
-  if (!from) throw new Error('Could not determine the default branch.');
-  const baseSha = await resolveCommitSha(args, headers, from);
-
-  try {
-    await requestJson(repoUrl(args, '/git/refs'), {
-      method: 'POST',
-      headers,
-      body: { ref: `refs/heads/${name}`, sha: baseSha },
-    });
-  } catch (err) {
-    if (!isAlreadyExists(err)) throw err;
-  }
-  return { branch: name, created: true };
+  return path;
 }
 
-export async function readFileOnRef(
-  args: Record<string, any>,
-  headers: Record<string, string>,
-  path: string,
-  ref: string
-): Promise<{ content: string; sha: string; size: number }> {
-  const encoded = encodeRepoPath(path);
-  const data = await requestJson(
-    `${repoUrl(args, `/contents/${encoded}`)}?ref=${encodeURIComponent(ref)}`,
-    { headers }
-  );
-  if (Array.isArray(data)) {
-    throw new Error(`"${path}" is a directory. Pass a file path.`);
-  }
 
-  let content: string | null = null;
-  if (typeof data.content === 'string' && data.content.length > 0) {
-    content = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
-  } else if (typeof data.download_url === 'string' && data.download_url) {
-    const downloaded = await fetch(data.download_url, {
-      headers: { Authorization: headers.Authorization!, 'User-Agent': headers['User-Agent']! },
-    });
-    if (!downloaded.ok) throw new Error(`GET ${path} download failed (${downloaded.status})`);
-    content = await downloaded.text();
-  }
 
-  if (content == null || !data.sha) {
-    throw new Error(`Could not read "${path}" at ref ${ref}.`);
-  }
-  return {
-    content,
-    sha: data.sha as string,
-    size: typeof data.size === 'number' ? data.size : content.length,
-  };
-}
-
-export async function putFile(
-  args: Record<string, any>,
-  headers: Record<string, string>,
-  input: {
-    path: string;
-    branch: string;
-    content: string;
-    message: string;
-    sha?: string;
-  }
-): Promise<{ commit?: string; url?: string }> {
-  if (Buffer.byteLength(input.content, 'utf8') > 900_000) {
-    throw new Error('That file is too large to write through GitHub. Keep it under 900 KB.');
-  }
-  const data = await requestJson(repoUrl(args, `/contents/${encodeRepoPath(input.path)}`), {
-    method: 'PUT',
-    headers,
-    body: {
-      message: input.message,
-      content: Buffer.from(input.content, 'utf8').toString('base64'),
-      branch: input.branch,
-      ...(input.sha ? { sha: input.sha } : {}),
-    },
-  });
-  return { commit: data.commit?.sha, url: data.content?.html_url };
-}
-
-export { isAlreadyExists };
 
