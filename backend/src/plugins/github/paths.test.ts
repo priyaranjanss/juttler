@@ -150,7 +150,3 @@ export function requiredPath(args: Record<string, unknown>): string {
   }
   return path;
 }
-
-
-
-
